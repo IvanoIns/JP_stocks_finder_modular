@@ -17,6 +17,7 @@ from tqdm import tqdm
 import logging
 import time
 import urllib.parse
+import random
 
 try:
     import investpy
@@ -27,13 +28,16 @@ except ImportError:
 
 import config
 
-# Configure logging
+# Configure logging - use WARNING level to reduce spam during backtests
 logging.basicConfig(
-    level=getattr(logging, config.LOG_LEVEL),
+    level=logging.WARNING,  # Changed from INFO to reduce spam
     format='%(asctime)s - %(levelname)s - %(message)s',
     datefmt='%H:%M:%S'
 )
 logger = logging.getLogger(__name__)
+
+# In-memory cache for Nikkei 225 (loaded once per session)
+_NIKKEI_225_CACHE = None
 
 
 # =============================================================================
@@ -200,22 +204,29 @@ def _get_fallback_tickers() -> list[str]:
 def get_nikkei_225_components(cache_duration_hours: int = None) -> set[str]:
     """
     Fetch Nikkei 225 components from Wikipedia for exclusion.
+    Uses in-memory cache for fast repeated access during backtests.
     
     Returns:
         Set of Nikkei 225 ticker symbols in yfinance format
     """
+    global _NIKKEI_225_CACHE
+    
+    # Return in-memory cache if available (fastest path)
+    if _NIKKEI_225_CACHE is not None:
+        return _NIKKEI_225_CACHE
+    
     if cache_duration_hours is None:
         cache_duration_hours = config.CACHE_TICKER_LIST_HOURS
     
     cache_file = config.CACHE_DIR / "nikkei_225_cache.csv"
     
-    # Check cache
+    # Check file cache
     if cache_file.exists():
         file_mod_time = cache_file.stat().st_mtime
         if (time.time() - file_mod_time) / 3600 < cache_duration_hours:
-            logger.info("Using cached Nikkei 225 list")
             df = pd.read_csv(cache_file)
-            return set(df['yfinance_ticker'])
+            _NIKKEI_225_CACHE = set(df['yfinance_ticker'])
+            return _NIKKEI_225_CACHE
     
     logger.info("Fetching fresh list of Nikkei 225 components from Wikipedia...")
     try:
@@ -257,6 +268,7 @@ def download_price_history(
     end_date: str = None,
     period: str = None,
     commit_interval: int = 50,
+    sleep_seconds: float = 0.0,
     progress: bool = True,
 ) -> int:
     """
@@ -322,7 +334,10 @@ def download_price_history(
             # Periodic commit for durability
             if (i + 1) % commit_interval == 0:
                 conn.commit()
-                
+            
+            if sleep_seconds and sleep_seconds > 0:
+                time.sleep(sleep_seconds)
+                 
         except Exception as e:
             logger.debug(f"Error downloading {symbol}: {e}")
             continue
@@ -453,6 +468,188 @@ def get_available_symbols(min_rows: int = 60) -> list[str]:
     return symbols
 
 
+def get_missing_symbols(
+    min_rows: int = 60,
+    exclude_nikkei: bool = True,
+    cache_duration_hours: int = None,
+) -> list[str]:
+    """
+    Return tickers that are NOT yet in the DB (or have fewer than min_rows).
+    """
+    if cache_duration_hours is None:
+        cache_duration_hours = config.CACHE_TICKER_LIST_HOURS
+
+    all_symbols = get_all_tse_tickers(cache_duration_hours=cache_duration_hours)
+    if not all_symbols:
+        return []
+
+    if exclude_nikkei:
+        nikkei = get_nikkei_225_components(cache_duration_hours=cache_duration_hours)
+        all_symbols = [s for s in all_symbols if s not in nikkei]
+
+    if config.EXCLUDED_SYMBOLS:
+        all_symbols = [s for s in all_symbols if s not in config.EXCLUDED_SYMBOLS]
+
+    existing = set(get_available_symbols(min_rows=min_rows))
+    missing = [s for s in all_symbols if s not in existing]
+    return missing
+
+
+def expand_db_incremental(
+    max_new: int = 200,
+    start_date: str = "2024-01-01",
+    end_date: str = None,
+    min_rows: int = 60,
+    exclude_nikkei: bool = True,
+    cache_duration_hours: int = None,
+    shuffle: bool = True,
+    commit_interval: int = 50,
+    sleep_seconds: float = 0.2,
+    progress: bool = True,
+) -> int:
+    """
+    Incrementally add missing tickers to the DB (capped per run).
+    Returns the number of symbols successfully downloaded.
+    """
+    if max_new is None or max_new < 0:
+        max_new = 0
+
+    missing = get_missing_symbols(
+        min_rows=min_rows,
+        exclude_nikkei=exclude_nikkei,
+        cache_duration_hours=cache_duration_hours,
+    )
+
+    if not missing:
+        logger.info("No missing symbols to expand.")
+        return 0
+
+    if shuffle:
+        random.shuffle(missing)
+
+    if max_new > 0:
+        missing = missing[:max_new]
+
+    return download_price_history(
+        missing,
+        start_date=start_date,
+        end_date=end_date,
+        commit_interval=commit_interval,
+        sleep_seconds=sleep_seconds,
+        progress=progress,
+    )
+
+
+def update_market_caps_incremental(
+    max_symbols: int = 300,
+    sleep_seconds: float = 0.2,
+    progress: bool = True,
+) -> int:
+    """
+    Populate missing market caps in symbol_info using yfinance.
+    Returns number of symbols updated with a market cap.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT symbol
+        FROM symbol_info
+        WHERE market_cap IS NULL
+        OR market_cap <= 0
+        """
+    )
+    existing_rows = {row[0] for row in cursor.fetchall()}
+
+    # Start with symbols that have price data
+    symbols_with_data = get_available_symbols(min_rows=60)
+
+    # Ensure symbol_info rows exist for symbols_with_data
+    to_seed = [s for s in symbols_with_data if s not in existing_rows]
+    for s in to_seed:
+        cursor.execute(
+            "INSERT OR IGNORE INTO symbol_info (symbol, last_updated) VALUES (?, ?)",
+            (s, datetime.now().strftime("%Y-%m-%d")),
+        )
+
+    # Now re-select missing caps
+    cursor.execute(
+        """
+        SELECT symbol
+        FROM symbol_info
+        WHERE market_cap IS NULL
+        OR market_cap <= 0
+        """
+    )
+    missing = [row[0] for row in cursor.fetchall()]
+    conn.commit()
+    conn.close()
+
+    if not missing:
+        logger.info("No missing market caps to update.")
+        return 0
+
+    if max_symbols and max_symbols > 0:
+        missing = missing[:max_symbols]
+
+    updated = 0
+    iterator = tqdm(missing, desc="Updating market caps") if progress else missing
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    for symbol in iterator:
+        try:
+            ticker = yf.Ticker(symbol)
+            # Try fast_info first (lighter)
+            mc = None
+            name = None
+            sector = None
+
+            try:
+                fi = getattr(ticker, "fast_info", None)
+                if fi and "market_cap" in fi:
+                    mc = fi.get("market_cap")
+            except Exception:
+                pass
+
+            if mc is None:
+                info = ticker.info
+                mc = info.get("marketCap") or info.get("market_cap")
+                name = info.get("shortName") or info.get("longName")
+                sector = info.get("sector")
+
+            if mc and mc > 0:
+                cursor.execute(
+                    """
+                    INSERT INTO symbol_info (symbol, name, sector, market_cap, last_updated)
+                    VALUES (?, COALESCE(?, name), COALESCE(?, sector), ?, ?)
+                    ON CONFLICT(symbol) DO UPDATE SET
+                        name = COALESCE(excluded.name, name),
+                        sector = COALESCE(excluded.sector, sector),
+                        market_cap = excluded.market_cap,
+                        last_updated = excluded.last_updated
+                    """,
+                    (
+                        symbol,
+                        name,
+                        sector,
+                        float(mc),
+                        datetime.now().strftime("%Y-%m-%d"),
+                    ),
+                )
+                updated += 1
+
+            if sleep_seconds and sleep_seconds > 0:
+                time.sleep(sleep_seconds)
+        except Exception:
+            continue
+
+    conn.commit()
+    conn.close()
+    return updated
+
+
 # =============================================================================
 # JPX Short Interest Data
 # =============================================================================
@@ -530,53 +727,71 @@ def fetch_jpx_short_data(cache_duration_hours: int = None) -> dict[str, dict]:
 
 
 def _process_jpx_dataframe(df: pd.DataFrame) -> dict[str, dict]:
-    """Process raw JPX DataFrame into usable format."""
+    """
+    Process raw JPX DataFrame into usable format.
+    
+    The JPX file structure:
+    - Rows 0-7: Headers/metadata
+    - Row 8-9: Column headers (Japanese/English)
+    - Row 10+: Data
+    - Column 2 (index 2): Stock Code
+    - Column 10 (index 10): Ratio of Short Positions (e.g., 0.0334 = 3.34%)
+    - Column 11 (index 11): Number of Short Positions in Shares
+    
+    Multiple rows exist per symbol (different short sellers), so we aggregate.
+    """
     try:
-        # Find header row
-        header_row = None
-        for i, row in df.iterrows():
-            if 'Code' in str(row.values):
-                header_row = i
-                break
-        
-        if header_row is not None:
-            df.columns = df.iloc[header_row]
-            df = df.iloc[header_row + 1:].reset_index(drop=True)
-        
-        # Find required columns
-        code_col = None
-        short_vol_col = None
-        
-        for col in df.columns:
-            col_str = str(col).lower()
-            if 'code' in col_str:
-                code_col = col
-            elif 'short' in col_str and 'volume' in col_str:
-                short_vol_col = col
-        
-        if code_col is None:
-            logger.error("Could not find 'Code' column in JPX data")
-            return {}
+        # The data starts after the header rows
+        # Use iloc to access by position since column names are messy
         
         result = {}
-        for _, row in df.iterrows():
+        
+        for idx in range(len(df)):
             try:
-                code = str(row[code_col])
+                row = df.iloc[idx]
+                
+                # Column 2 is the stock code (0-indexed)
+                code_raw = row.iloc[2] if len(row) > 2 else None
+                if pd.isna(code_raw):
+                    continue
+                    
+                code = str(code_raw).strip()
+                
+                # Skip non-numeric codes (header rows, etc.)
                 if not code.isdigit():
                     continue
                 
                 symbol = code + '.T'
-                short_vol = float(row[short_vol_col]) if short_vol_col and pd.notna(row[short_vol_col]) else 0
                 
-                # Estimate short ratio (we may not have total volume in this file)
-                result[symbol] = {
-                    'short_ratio': 0.0,  # Will be calculated if we have volume
-                    'short_volume': int(short_vol),
-                }
+                # Column 10 is the short ratio (e.g., 0.0334)
+                short_ratio_raw = row.iloc[10] if len(row) > 10 else None
+                short_ratio = float(short_ratio_raw) if pd.notna(short_ratio_raw) else 0.0
+                
+                # Column 11 is the number of short shares
+                short_shares_raw = row.iloc[11] if len(row) > 11 else None
+                short_shares = int(float(short_shares_raw)) if pd.notna(short_shares_raw) else 0
+                
+                # Aggregate: keep the highest short ratio for each symbol
+                # (multiple short sellers may be listed, we want the total exposure)
+                if symbol in result:
+                    # Accumulate short shares, keep max ratio
+                    result[symbol]['short_volume'] += short_shares
+                    result[symbol]['short_ratio'] = max(result[symbol]['short_ratio'], short_ratio)
+                else:
+                    result[symbol] = {
+                        'short_ratio': short_ratio,
+                        'short_volume': short_shares,
+                    }
+                    
             except Exception:
                 continue
         
-        logger.info(f"Processed JPX data for {len(result)} symbols")
+        # Log summary
+        if result:
+            avg_ratio = sum(d['short_ratio'] for d in result.values()) / len(result)
+            max_ratio = max(d['short_ratio'] for d in result.values())
+            logger.warning(f"Processed JPX data: {len(result)} symbols, avg ratio={avg_ratio:.2%}, max={max_ratio:.2%}")
+        
         return result
         
     except Exception as e:
@@ -587,7 +802,7 @@ def _process_jpx_dataframe(df: pd.DataFrame) -> dict[str, dict]:
 def get_jpx_short_for_date(date: str = None) -> dict[str, dict]:
     """
     Get short interest data for a specific date.
-    Falls back to most recent available if date not found.
+    Falls back to most recent available <= date (no lookahead).
     
     Returns:
         Dict: {symbol: {'short_ratio': float}}
@@ -608,12 +823,16 @@ def get_jpx_short_for_date(date: str = None) -> dict[str, dict]:
     
     # If no data, get most recent
     if not rows:
-        cursor.execute("""
-            SELECT symbol, short_ratio, short_volume, total_volume
-            FROM jpx_short_interest
-            WHERE date = (SELECT MAX(date) FROM jpx_short_interest)
-        """)
-        rows = cursor.fetchall()
+        cursor.execute("SELECT MAX(date) FROM jpx_short_interest WHERE date <= ?", (date,))
+        last_row = cursor.fetchone()
+        last_date = last_row[0] if last_row and last_row[0] else None
+        if last_date:
+            cursor.execute("""
+                SELECT symbol, short_ratio, short_volume, total_volume
+                FROM jpx_short_interest
+                WHERE date = ?
+            """, (last_date,))
+            rows = cursor.fetchall()
     
     conn.close()
     
@@ -681,11 +900,12 @@ def build_liquid_universe(
     
     conn = get_connection()
     
-    # Get symbols with price data for this date
+    # Get symbols with price data for this date (optionally include market cap)
     query = """
-        SELECT symbol, close, volume, (close * volume) as notional
-        FROM daily_prices
-        WHERE date = ? AND volume >= ?
+        SELECT p.symbol, p.close, p.volume, (p.close * p.volume) as notional, s.market_cap
+        FROM daily_prices p
+        LEFT JOIN symbol_info s ON p.symbol = s.symbol
+        WHERE p.date = ? AND p.volume >= ?
         ORDER BY notional DESC
     """
     df = pd.read_sql_query(query, conn, params=(date, min_volume))
@@ -695,6 +915,16 @@ def build_liquid_universe(
         logger.warning(f"No data found for date {date}")
         return []
     
+    # Apply market-cap filter if enabled
+    if getattr(config, "ENFORCE_MARKET_CAP", False):
+        max_cap = getattr(config, "MAX_MARKET_CAP_JPY", None)
+        missing_policy = getattr(config, "MARKET_CAP_MISSING_POLICY", "include")
+        if max_cap is not None:
+            if missing_policy == "exclude":
+                df = df[df["market_cap"].notna() & (df["market_cap"] <= max_cap)]
+            else:
+                df = df[df["market_cap"].isna() | (df["market_cap"] <= max_cap)]
+
     symbols = df['symbol'].tolist()
     
     # Exclude Nikkei 225

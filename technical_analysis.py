@@ -534,6 +534,9 @@ def calculate_all_indicators(
     Calculate all indicators for a price DataFrame.
     Adds columns for each indicator.
     
+    OPTIMIZATION: If indicators are already calculated (e.g., from pre-compute),
+    this function returns the data as-is, avoiding expensive recalculation.
+    
     Args:
         data: DataFrame with columns: open, high, low, close, volume
         scanner_config: Configuration dict (uses config.SCANNER_CONFIG if None)
@@ -541,6 +544,11 @@ def calculate_all_indicators(
     Returns:
         DataFrame with original + indicator columns
     """
+    # FAST PATH: Skip if indicators already calculated
+    # This is the key optimization for pre-computed data!
+    if 'rsi' in data.columns and 'ema_fast' in data.columns:
+        return data  # Already has indicators, no need to recalculate!
+    
     if scanner_config is None:
         scanner_config = config.SCANNER_CONFIG
     

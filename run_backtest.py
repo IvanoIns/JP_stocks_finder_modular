@@ -45,12 +45,12 @@ Examples:
     parser.add_argument('--max-positions', type=int, default=config.MAX_POSITIONS,
                         help=f'Max concurrent positions (default: {config.MAX_POSITIONS})')
     parser.add_argument('--exit-mode', type=str, default=config.EXIT_MODE,
-                        choices=['default', 'trailing', 'breakeven', 'breakeven_trailing'],
+                        choices=['default', 'trailing', 'breakeven', 'breakeven_trailing', 'fixed_rr'],
                         help=f'Exit mode (default: {config.EXIT_MODE})')
     parser.add_argument('--stop-loss', type=float, default=config.STOP_LOSS_PCT,
                         help=f'Stop loss percentage (default: {config.STOP_LOSS_PCT})')
-    parser.add_argument('--min-score', type=int, default=config.MIN_SCORE,
-                        help=f'Minimum scanner score (default: {config.MIN_SCORE})')
+    parser.add_argument('--min-score', type=int, default=config.MIN_SCANNER_SCORE,
+                        help=f'Minimum scanner score (default: {config.MIN_SCANNER_SCORE})')
     
     # Output options
     parser.add_argument('--export', type=str, 

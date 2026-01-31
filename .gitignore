@@ -1,37 +1,28 @@
-# Byte-compiled / optimized / DLL files
+# Environment Variables (Secrets)
+.env
+.env.local
+
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
 
-# Virtual environments
-venv/
-env/
-.venv/
-
-# Environment variables
-.env
-
-# Database files
-*.db
-
-# Cache files
+# Database & Cache
+jp_stocks.db
 cache/
-*.xlsx
-*.csv
+results/
+results/precomputed_cache.pkl
+results/trade_history_*.csv
+results/scanner_performance.csv
+# Logs
+*.log
+# Keep best_params.json as it is a config artifact
+# results/best_params.json 
 
 # IDE
 .vscode/
 .idea/
 
-# OS files
+# OS
 .DS_Store
 Thumbs.db
-
-# Jupyter
-.ipynb_checkpoints/
-
-# Results (can be regenerated)
-results/
-
-# Logs
-*.log

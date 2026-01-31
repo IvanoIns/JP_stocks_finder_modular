@@ -42,6 +42,8 @@ class Position:
     target_1_hit: bool = False
     peak_price: float = None  # For trailing stop
     entry_value: float = None
+    scanner_name: str = None  # Which scanner generated this signal
+    profit_target_price: float = None  # Fixed R:R target
     
     def __post_init__(self):
         if self.remaining_quantity is None:
@@ -66,7 +68,8 @@ class Trade:
     quantity: float
     pnl: float
     pnl_pct: float
-    exit_reason: str  # 'stop_loss', 'target_1', 'target_2', 'trailing', 'end_of_backtest'
+    exit_reason: str  # 'stop_loss', 'target_1', 'target_2', 'trailing', 'profit_target', 'end_of_backtest'
+    scanner_name: str = None  # Which scanner generated this signal
 
 
 @dataclass
@@ -79,6 +82,7 @@ class PendingEntry:
     score: int
     signal_date: str
     signal_price: float
+    scanner_name: str = None  # Which scanner generated this signal
 
 
 # =============================================================================
@@ -108,6 +112,7 @@ class BacktestEngine:
         trailing_stop_pct: float = None,
         slippage_pct: float = None,
         commission_pct: float = None,
+        risk_reward_ratio: float = None,
     ):
         # Use config defaults if not specified
         self.initial_balance = initial_balance
@@ -122,6 +127,7 @@ class BacktestEngine:
         self.target_2_pct = target_2_pct or config.TARGET_2_PCT
         self.exit_mode = exit_mode or config.EXIT_MODE
         self.trailing_stop_pct = trailing_stop_pct or config.TRAILING_STOP_PCT
+        self.risk_reward_ratio = risk_reward_ratio if risk_reward_ratio is not None else config.RISK_REWARD_RATIO
         
         # Costs
         self.slippage_pct = slippage_pct if slippage_pct is not None else config.BACKTEST_SLIPPAGE_PCT
@@ -174,12 +180,16 @@ class BacktestEngine:
         """
         Queue a signal for entry at next day's open.
         """
+        # Extract scanner name from strategy (format: "scanner_name" or combined)
+        scanner_name = signal.get('scanner_name') or signal.get('strategy', 'unknown')
+        
         self.pending_entries.append(PendingEntry(
             symbol=signal['symbol'],
             strategy=signal['strategy'],
             score=signal['score'],
             signal_date=current_date,
             signal_price=current_price,
+            scanner_name=scanner_name,
         ))
     
     def process_pending_entries(
@@ -222,6 +232,9 @@ class BacktestEngine:
             # Apply commission
             commission = position_value * self.commission_pct
             
+            # Calculate profit target based on R:R ratio (stop_loss_pct * ratio)
+            profit_target_pct = self.stop_loss_pct * self.risk_reward_ratio
+            
             # Create position
             position = Position(
                 symbol=entry.symbol,
@@ -232,6 +245,8 @@ class BacktestEngine:
                 stop_price=entry_price * (1 - self.stop_loss_pct),
                 target_1_price=entry_price * (1 + self.target_1_pct),
                 target_2_price=entry_price * (1 + self.target_2_pct),
+                scanner_name=entry.scanner_name,
+                profit_target_price=entry_price * (1 + profit_target_pct),
             )
             
             self.positions[entry.symbol] = position
@@ -283,8 +298,19 @@ class BacktestEngine:
                 exits += 1
                 continue
             
-            # 2. Target 1 Check (partial exit)
-            if not position.target_1_hit and high >= position.target_1_price:
+            # 1.5 Fixed R:R Profit Target Check (exit_mode='fixed_rr')
+            if self.exit_mode == 'fixed_rr' and position.profit_target_price:
+                if high >= position.profit_target_price:
+                    self._close_position(
+                        symbol, date, position.profit_target_price,
+                        position.remaining_quantity, 'profit_target'
+                    )
+                    symbols_to_close.append(symbol)
+                    exits += 1
+                    continue
+            
+            # 2. Target 1 Check (partial exit) - skip if using fixed_rr
+            if self.exit_mode != 'fixed_rr' and not position.target_1_hit and high >= position.target_1_price:
                 sell_qty = position.quantity * self.target_1_portion
                 self._close_position(
                     symbol, date, position.target_1_price,
@@ -303,8 +329,8 @@ class BacktestEngine:
                     exits += 1
                     continue
             
-            # 3. Target 2 Check (close remainder)
-            if position.target_1_hit and high >= position.target_2_price:
+            # 3. Target 2 Check (close remainder) - skip if using fixed_rr
+            if self.exit_mode != 'fixed_rr' and position.target_1_hit and high >= position.target_2_price:
                 self._close_position(
                     symbol, date, position.target_2_price,
                     position.remaining_quantity, 'target_2'
@@ -371,6 +397,7 @@ class BacktestEngine:
             pnl=pnl,
             pnl_pct=pnl_pct,
             exit_reason=reason,
+            scanner_name=position.scanner_name,
         ))
         
         # Update cash
@@ -481,6 +508,7 @@ def run_daily_backtest(
     target_2_pct: float = None,
     exit_mode: str = None,
     trailing_stop_pct: float = None,
+    risk_reward_ratio: float = None,  # NEW: for fixed_rr exit mode
     min_score: int = None,
     scanner_config: dict = None,
     liquidate_on_end: bool = True,
@@ -516,7 +544,7 @@ def run_daily_backtest(
     if top_n is None:
         top_n = config.UNIVERSE_TOP_N
     if min_score is None:
-        min_score = config.MIN_SCORE
+        min_score = config.MIN_SCANNER_SCORE
     if scanner_config is None:
         scanner_config = config.get_scanner_config()
     
@@ -531,6 +559,7 @@ def run_daily_backtest(
         target_2_pct=target_2_pct,
         exit_mode=exit_mode,
         trailing_stop_pct=trailing_stop_pct,
+        risk_reward_ratio=risk_reward_ratio,  # NEW
     )
     
     # Get all trading dates
@@ -558,28 +587,40 @@ def run_daily_backtest(
     for i, date in iterator:
         # 1. Build liquid universe for this date
         universe = dm.build_liquid_universe(date, top_n=top_n)
-        if not universe:
+        held_symbols = set(engine.positions.keys())
+        pending_symbols = {e.symbol for e in engine.pending_entries}
+        if not universe and not held_symbols and not pending_symbols:
             continue
         
         # 2. Get price data (need lookback for indicators)
         lookback_start = (datetime.strptime(date, '%Y-%m-%d') - timedelta(days=lookback_days)).strftime('%Y-%m-%d')
-        bars_batch = dm.get_daily_bars_batch(universe, lookback_start, date)
+        bars_batch = {}
+        if universe:
+            bars_batch = dm.get_daily_bars_batch(universe, lookback_start, date)
         
-        # Get today's bars for exit checks
+        extra_symbols = list((held_symbols | pending_symbols) - set(universe))
+        extra_bars_batch = {}
+        if extra_symbols:
+            extra_bars_batch = dm.get_daily_bars_batch(extra_symbols, date, date)
+        
+        # Get today's bars for exit checks and entries
         today_bars = {}
         open_prices = {}
         close_prices = {}
         
-        for symbol, df in bars_batch.items():
-            if len(df) < 20:  # Need minimum data
-                continue
-            
-            # Get today's bar
-            today_data = df[df.index.strftime('%Y-%m-%d') == date]
-            if len(today_data) > 0:
-                today_bars[symbol] = today_data.iloc[-1]
-                open_prices[symbol] = today_data.iloc[-1]['open']
-                close_prices[symbol] = today_data.iloc[-1]['close']
+        def add_today_bars(batch: dict):
+            for symbol, df in batch.items():
+                if df is None or df.empty:
+                    continue
+                today_data = df[df.index.strftime('%Y-%m-%d') == date]
+                if len(today_data) > 0:
+                    bar = today_data.iloc[-1]
+                    today_bars[symbol] = bar
+                    open_prices[symbol] = bar['open']
+                    close_prices[symbol] = bar['close']
+        
+        add_today_bars(bars_batch)
+        add_today_bars(extra_bars_batch)
         
         # 3. Process pending entries from yesterday's signals (at today's open)
         engine.process_pending_entries(date, open_prices)
@@ -587,10 +628,7 @@ def run_daily_backtest(
         # 4. Check exits for existing positions
         engine.check_exits(date, today_bars)
         
-        # 5. Get JPX short data (if available)
-        jpx_data = dm.get_jpx_short_for_date(date)
-        
-        # 6. Run scanners on each symbol in universe
+        # 5. Run scanners on each symbol in universe
         for symbol in universe:
             if symbol not in bars_batch:
                 continue
@@ -599,12 +637,9 @@ def run_daily_backtest(
             if len(data) < 60:
                 continue
             
-            # Get short data for this symbol
-            symbol_jpx = jpx_data.get(symbol, {'short_ratio': 0})
-            
             # Run scanners
             signals = scanners.get_all_signals(
-                symbol, data, symbol_jpx, scanner_config, min_score
+                symbol, data, None, scanner_config, min_score
             )
             
             # Queue best signals for next day entry
@@ -654,6 +689,142 @@ def get_equity_curve_df(engine: BacktestEngine) -> pd.DataFrame:
 
 
 # =============================================================================
+# Fast Backtest (Uses Pre-Computed Data)
+# =============================================================================
+
+def run_fast_backtest(
+    precomputed,  # PrecomputedData object from precompute.py
+    initial_balance: float,
+    max_positions: int = None,
+    position_size_pct: float = None,
+    stop_loss_pct: float = None,
+    target_1_pct: float = None,
+    target_1_portion: float = None,
+    target_2_pct: float = None,
+    exit_mode: str = None,
+    trailing_stop_pct: float = None,
+    risk_reward_ratio: float = None,  # NEW: for fixed_rr exit mode
+    min_score: int = None,
+    scanner_config: dict = None,
+    liquidate_on_end: bool = True,
+    progress: bool = False,
+    start_date: str = None,
+    end_date: str = None,
+) -> Tuple[BacktestEngine, dict]:
+    """
+    ULTRA-FAST backtest using pre-computed signals.
+    
+    10-100x faster because:
+    - Signals are already computed for all dates
+    - Bars are pre-indexed for O(1) lookup
+    - Just loops through dates and looks up data
+    
+    Args:
+        precomputed: PrecomputedData from precompute_all_data()
+        start_date: Optional start date filter (inclusive)
+        end_date: Optional end date filter (inclusive)
+    
+    Returns:
+        (engine: BacktestEngine, metrics: dict)
+    """
+    precomputed_min_score = getattr(precomputed, "min_score", None)
+    cache_raw = getattr(precomputed, "raw_signals", False)
+    precomputed_scanner_config = getattr(precomputed, "scanner_config", None)
+
+    if precomputed_min_score is None:
+        logger.warning("Precomputed cache missing min_score metadata. Rebuild recommended for accuracy.")
+    elif (not cache_raw) and min_score is not None and min_score != precomputed_min_score:
+        raise ValueError(
+            f"Precomputed cache uses min_score={precomputed_min_score}, "
+            f"but run_fast_backtest requested min_score={min_score}. "
+            "Rebuild cache or use run_daily_backtest for correctness."
+        )
+
+    if scanner_config is not None:
+        if not precomputed_scanner_config:
+            logger.warning("Precomputed cache missing scanner_config metadata. Rebuild recommended for accuracy.")
+        elif scanner_config != precomputed_scanner_config:
+            raise ValueError(
+                "Precomputed cache was built with a different scanner_config. "
+                "Rebuild cache or use run_daily_backtest for correctness."
+            )
+
+    # Initialize engine
+    engine = BacktestEngine(
+        initial_balance=initial_balance,
+        max_positions=max_positions,
+        position_size_pct=position_size_pct,
+        stop_loss_pct=stop_loss_pct,
+        target_1_pct=target_1_pct,
+        target_1_portion=target_1_portion,
+        target_2_pct=target_2_pct,
+        exit_mode=exit_mode,
+        trailing_stop_pct=trailing_stop_pct,
+        risk_reward_ratio=risk_reward_ratio,  # NEW
+    )
+    
+    trading_dates = precomputed.trading_dates
+    
+    # Filter dates for Walk-Forward Analysis or specific periods
+    if start_date:
+        trading_dates = [d for d in trading_dates if d >= start_date]
+    if end_date:
+        trading_dates = [d for d in trading_dates if d <= end_date]
+    
+    if not trading_dates:
+        return engine, engine.calculate_metrics()
+    
+    # ULTRA-FAST loop - just lookups!
+    for date in trading_dates:
+        # Get pre-computed bars for this date
+        bars_today = precomputed.bars_by_date.get(date, {})
+        
+        open_prices = {s: b['open'] for s, b in bars_today.items()}
+        close_prices = {s: b['close'] for s, b in bars_today.items()}
+        
+        # Convert bar dicts to Series for exit checks
+        today_bars = {}
+        for symbol, bar in bars_today.items():
+            today_bars[symbol] = pd.Series(bar)
+        
+        # Process pending entries
+        engine.process_pending_entries(date, open_prices)
+        
+        # Check exits
+        engine.check_exits(date, today_bars)
+        
+        # Get PRE-COMPUTED signals for this date (O(1) lookup!)
+        signals = precomputed.get_signals(date)
+        if cache_raw and min_score is not None:
+            signals = [s for s in signals if s.get("score", 0) >= min_score]
+        
+        # Queue top signals
+        for signal in signals:
+            if not engine.can_open_position():
+                break
+            
+            symbol = signal['symbol']
+            if symbol in engine.positions:
+                continue  # Already have position
+            
+            current_price = close_prices.get(symbol, 0)
+            if current_price > 0:
+                engine.queue_entry(signal, date, current_price)
+        
+        # Record daily balance
+        engine.record_daily_balance(date, close_prices)
+    
+    # Liquidate remaining
+    if liquidate_on_end and engine.positions:
+        last_date = trading_dates[-1]
+        last_bars = precomputed.bars_by_date.get(last_date, {})
+        last_prices = {s: b['close'] for s, b in last_bars.items()}
+        engine.liquidate_all(last_date, last_prices)
+    
+    return engine, engine.calculate_metrics()
+
+
+# =============================================================================
 # Module Test
 # =============================================================================
 
@@ -684,3 +855,4 @@ if __name__ == "__main__":
         print(f"[ ] Could not check database: {e}")
     
     print("\nbacktesting module tests passed!")
+

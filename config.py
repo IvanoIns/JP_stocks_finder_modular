@@ -1,11 +1,11 @@
 """
 JP Stocks Modular Trading System — Configuration
 
-Centralized settings for all modules. You can override these in notebook
-sessions without editing this file:
+config.py is the single source of truth for parameters.
+You can override in notebook sessions:
 
     import config
-    config.MAX_RSI_ENTRY = 65
+    config.MIN_SCANNER_SCORE = 35
     config.UNIVERSE_TOP_N = 50
 """
 
@@ -15,7 +15,6 @@ from dotenv import load_dotenv
 
 # Load environment variables from .env file
 load_dotenv()
-
 
 # =============================================================================
 # Paths
@@ -33,45 +32,57 @@ RESULTS_DIR.mkdir(exist_ok=True)
 # =============================================================================
 # Data Source Settings
 # =============================================================================
-CACHE_TICKER_LIST_HOURS = 720      # 30 days - ticker list cache
-CACHE_JPX_DATA_HOURS = 12          # 12 hours - JPX short data cache
-YFINANCE_HISTORY_PERIOD = "5y"     # Default history period for backfill
+CACHE_TICKER_LIST_HOURS = 720
+CACHE_JPX_DATA_HOURS = 12
+YFINANCE_HISTORY_PERIOD = "5y"
+
+# =============================================================================
+# Auto-Expand DB (incremental daily growth)
+# =============================================================================
+# If True, precompute.py will auto-download missing tickers before building cache.
+AUTO_EXPAND_DB = True
+AUTO_EXPAND_DB_MAX_NEW = 1000         # New symbols per run (cap for safety)
+AUTO_EXPAND_DB_START_DATE = "2024-01-01"
+AUTO_EXPAND_DB_MIN_ROWS = 60
+AUTO_EXPAND_DB_SLEEP_SECONDS = 0.2
+AUTO_EXPAND_DB_CHUNK_SIZE = 50
+AUTO_EXPAND_DB_SHUFFLE = True
+
+# =============================================================================
+# Cache Behavior
+# =============================================================================
+# If True, cache stores all triggered signals (score > 0) and filters later by MIN_SCANNER_SCORE.
+CACHE_RAW_SIGNALS = True
+
+# =============================================================================
+# Market Cap Ingestion (for universe filter)
+# =============================================================================
+# If True, precompute will update missing market caps each run (incremental).
+AUTO_UPDATE_MARKET_CAP = True
+AUTO_UPDATE_MARKET_CAP_MAX = 300     # Symbols per run
+AUTO_UPDATE_MARKET_CAP_SLEEP = 0.2
 
 
 # =============================================================================
 # Universe Filters
 # =============================================================================
-# Market cap filter (exclude mega-caps for better alpha opportunity)
-MAX_MARKET_CAP_JPY = 500_000_000_000     # 500 billion JPY
-
-# Liquidity filters
-MIN_AVG_DAILY_VOLUME = 100_000           # Minimum average daily volume
-LIQUIDITY_FLOOR_JPY = 100_000_000        # 100 million JPY daily notional
-
-# Universe size
-UNIVERSE_TOP_N = 100                     # Top N by volume for backtests
-EXCLUDE_NIKKEI_225 = True                # Exclude Nikkei 225 components
+MAX_MARKET_CAP_JPY = 500_000_000_000
+# Enforce market-cap filter in universe selection (if market cap data exists)
+ENFORCE_MARKET_CAP = True
+# Policy when market cap is missing: "include" or "exclude"
+MARKET_CAP_MISSING_POLICY = "include"
+# NOTE: This is a per-day volume filter (name kept for backward compatibility).
+# Lower it to include smaller/micro-cap names that can "burst".
+MIN_AVG_DAILY_VOLUME = 20_000
+LIQUIDITY_FLOOR_JPY = 100_000_000
+# Expanded universe to reduce large-cap bias from "top notional" ranking.
+UNIVERSE_TOP_N = 500
+EXCLUDE_NIKKEI_225 = True
 
 # Performance pre-filters (from JP prototype)
 PERFORMANCE_LOOKBACK_DAYS = 180
 PERFORMANCE_MIN_RISE_PERCENT = 2.0
 PERFORMANCE_NEAR_52W_HIGH_THRESHOLD = 0.10
-
-
-# =============================================================================
-# Entry Filters (Scanner Thresholds)
-# =============================================================================
-ENTRY_FILTERS = {
-    'MAX_RSI_ENTRY': 70,          # Maximum RSI for entry
-    'MIN_VOLUME_SURGE': 1.5,      # Minimum volume spike factor
-    'MIN_SCORE': 50,              # Minimum scanner score to qualify
-    'REQUIRE_MACD_BULLISH': False,
-}
-
-# Individual variables for direct access
-MAX_RSI_ENTRY = ENTRY_FILTERS['MAX_RSI_ENTRY']
-MIN_VOLUME_SURGE = ENTRY_FILTERS['MIN_VOLUME_SURGE']
-MIN_SCORE = ENTRY_FILTERS['MIN_SCORE']
 
 
 # =============================================================================
@@ -130,41 +141,52 @@ SCANNER_CONFIG = {
     
     # === Risk/Reward ===
     'MIN_RISK_REWARD': 2.0,                 # Minimum R:R ratio
+    
+    # === NEW: Smart Money Flow (replaces Power Combinations) ===
+    'SMART_MONEY_MIN_RELATIVE_STRENGTH': -2,  # Max 2% down in 10 days
+    
+    # === NEW: Crash Then Burst (JP penny stock pattern) ===
+    'CRASH_MIN_DROP_PCT': -25,              # Minimum 25% crash from high
+    'CRASH_VOLUME_CLIMAX': 3.0,             # 3x volume spike on crash
+    'CRASH_SHORT_SQUEEZE_MIN': 0.05,        # 5%+ short interest for squeeze
+    
+    # === NEW: Stealth Accumulation ===
+    'STEALTH_MIN_VOLUME_INCREASE': 15,      # 15%+ volume increase
+    'STEALTH_MIN_VOLATILITY_COMPRESSION': 20,  # 20%+ volatility squeeze
+    'STEALTH_WIN_RATE_MIN': 0.55,           # Subtle bullish bias
+    'STEALTH_WIN_RATE_MAX': 0.65,           # Not too obvious
+    
+    # === NEW: Coiling Pattern ===
+    'COILING_MIN_BB_SQUEEZE': 30,           # 30%+ Bollinger Band squeeze
+    'COILING_MIN_ATR_COMPRESSION': 25,      # 25%+ ATR compression
 }
+
+# =============================================================================
+# Early Mode (Pre-Burst) Filters
+# =============================================================================
+EARLY_MODE_ENABLED = True
+EARLY_MODE_SHOW_BOTH = False  # Show legacy mode output alongside early mode
+EARLY_MODE_RSI_MAX = 65       # RSI must be <= 65 (not overbought)
+EARLY_MODE_10D_RETURN_MAX = 0.15  # 10-day return must be < 15% (close-to-close)
+EARLY_MODE_SCANNERS = [
+    'oversold_bounce',
+    'reversal_rocket',
+    'volatility_explosion',
+    'coiling_pattern',
+    'consolidation_breakout',
+]
 
 
 # =============================================================================
 # Exit Strategy Settings
 # =============================================================================
-EXIT_STRATEGIES = {
-    'conservative': {
-        'stop_loss_pct': 0.05,
-        'target_1_pct': 0.03,
-        'target_1_portion': 0.50,
-        'target_2_pct': 0.06,
-    },
-    'moderate': {
-        'stop_loss_pct': 0.05,
-        'target_1_pct': 0.05,
-        'target_1_portion': 0.50,
-        'target_2_pct': 0.10,
-    },
-    'aggressive': {
-        'stop_loss_pct': 0.07,
-        'target_1_pct': 0.07,
-        'target_1_portion': 0.33,
-        'target_2_pct': 0.15,
-    }
-}
-
-# Default exit parameters
-STOP_LOSS_PCT = 0.05              # 5% stop loss
+STOP_LOSS_PCT = 0.06              # 6% stop loss
 TARGET_1_PCT = 0.03               # 3% first target
 TARGET_1_PORTION = 0.50           # Sell 50% at T1
 TARGET_2_PCT = 0.06               # 6% second target (remaining position)
 
-# Exit mode options: 'default', 'trailing', 'breakeven', 'breakeven_trailing'
-EXIT_MODE = 'default'
+# Exit mode options: 'default', 'trailing', 'breakeven', 'breakeven_trailing', 'fixed_rr'
+EXIT_MODE = 'fixed_rr'
 TRAILING_STOP_PCT = 0.03          # 3% trailing stop from peak
 
 
@@ -177,13 +199,20 @@ FIXED_FRACTIONAL_PCT = 0.20               # 20% per position
 MAX_POSITION_PCT = 0.25                   # Max 25% in single position
 RISK_PER_TRADE_PCT = 0.02                 # 2% risk per trade (for volatility sizing)
 
+# =============================================================================
+# Execution Constraints (Broker Lots)
+# =============================================================================
+MAX_JPY_PER_TRADE = 100_000               # Max JPY per play (budget cap)
+LOT_SIZE = 100                            # JP standard lot size
+
 
 # =============================================================================
 # Backtest Settings
 # =============================================================================
 BACKTEST_TIMEFRAME = '1d'                 # Daily bars only for JP stocks
-BACKTEST_SLIPPAGE_PCT = 0.001             # 0.1% slippage
-BACKTEST_COMMISSION_PCT = 0.001           # 0.1% commission (round-trip estimate)
+BACKTEST_SLIPPAGE_PCT = 0.004             # 0.4% slippage (realistic for small-caps, includes spread)
+BACKTEST_COMMISSION_PCT = 0.001           # 0.1% commission
+# Total round-trip: ~1% (0.5% entry + 0.5% exit) - conservative for illiquid names
 MIN_HOLD_DAYS = 1                         # Minimum holding period
 
 
@@ -194,14 +223,27 @@ MAX_DRAWDOWN_CAP = 0.25           # Max 25% drawdown allowed
 MIN_WIN_RATE = 0.45               # Min 45% win rate required
 MIN_TRADES = 20                   # Minimum trades for statistical validity
 
+# =============================================================================
+# === FINAL PARAMETERS (Proven: PF 2.46, 59% Win Rate) ===
+# =============================================================================
+MIN_SCANNER_SCORE = 30            # Sweet spot (tested 15-50)
+MIN_HISTORY_DAYS = 60             # Minimum days of history needed
+
+# Exit Strategy
+RISK_REWARD_RATIO = 2.0           # 2:1 R:R -> 12% Profit Target
+
+# Scanner Classification
+STAR_SCANNERS = ['oversold_bounce', 'burst_candidates', 'momentum_star']
+SOLID_SCANNERS = ['relative_strength', 'volatility_explosion', 'coiling_pattern']
+DISABLED_SCANNERS = ['crash_then_burst', 'stealth_accumulation']  # PF 0.00
 
 # =============================================================================
 # Walk-Forward Settings
 # =============================================================================
-WFA_TRAIN_DAYS = 90               # Training window (3 months)
-WFA_TEST_DAYS = 30                # Testing window (1 month)
-WFA_STEP_DAYS = 21                # Step size (3 weeks)
-WFA_MIN_TEST_TRADES = 10          # Minimum trades in test period
+WFA_TRAIN_DAYS = 180              # Training window (6 months) - longer for stability
+WFA_TEST_DAYS = 90                # Testing window (3 months) - longer for validity
+WFA_STEP_DAYS = 60                # Step size (2 months)
+WFA_MIN_TEST_TRADES = 5           # Minimum trades in test period
 
 
 # =============================================================================
@@ -233,11 +275,6 @@ def get_scanner_config() -> dict:
     return SCANNER_CONFIG.copy()
 
 
-def get_exit_strategy(name: str = 'moderate') -> dict:
-    """Get exit strategy parameters by name."""
-    return EXIT_STRATEGIES.get(name, EXIT_STRATEGIES['moderate']).copy()
-
-
 def print_config_summary():
     """Print a summary of current configuration."""
     print("=" * 60)
@@ -248,21 +285,30 @@ def print_config_summary():
     print(f"Max Market Cap: ¥{MAX_MARKET_CAP_JPY:,.0f}")
     print(f"Exclude Nikkei 225: {EXCLUDE_NIKKEI_225}")
     print("-" * 60)
-    print("Entry Filters:")
-    print(f"  Max RSI: {MAX_RSI_ENTRY}")
-    print(f"  Min Volume Surge: {MIN_VOLUME_SURGE}x")
-    print(f"  Min Score: {MIN_SCORE}")
+    print("Signal Filters:")
+    print(f"  Min Scanner Score: {MIN_SCANNER_SCORE}")
     print("-" * 60)
     print("Exit Strategy:")
     print(f"  Stop Loss: {STOP_LOSS_PCT:.1%}")
-    print(f"  Target 1: {TARGET_1_PCT:.1%} ({TARGET_1_PORTION:.0%} of position)")
-    print(f"  Target 2: {TARGET_2_PCT:.1%}")
     print(f"  Exit Mode: {EXIT_MODE}")
+    print(f"  Risk Reward: {RISK_REWARD_RATIO}")
+    print("-" * 60)
+    print("Early Mode:")
+    print(f"  Enabled: {EARLY_MODE_ENABLED}")
+    print(f"  RSI Max: {EARLY_MODE_RSI_MAX}")
+    print(f"  10D Return Max: {EARLY_MODE_10D_RETURN_MAX:.0%}")
+    print(f"  Scanners: {', '.join(EARLY_MODE_SCANNERS)}")
     print("-" * 60)
     print("Position Sizing:")
     print(f"  Max Positions: {MAX_POSITIONS}")
     print(f"  Method: {POSITION_SIZING_METHOD}")
     print(f"  Size per Trade: {FIXED_FRACTIONAL_PCT:.1%}")
+    print(f"  Max JPY per Trade: {MAX_JPY_PER_TRADE:,.0f} (Lot Size: {LOT_SIZE})")
+    print("-" * 60)
+    print("Auto-Expand DB:")
+    print(f"  Enabled: {AUTO_EXPAND_DB}")
+    print(f"  Max New: {AUTO_EXPAND_DB_MAX_NEW}")
+    print(f"  Start: {AUTO_EXPAND_DB_START_DATE}")
     print("-" * 60)
     print("Optimizer Constraints:")
     print(f"  Max Drawdown: {MAX_DRAWDOWN_CAP:.1%}")

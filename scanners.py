@@ -19,6 +19,24 @@ import technical_analysis as ta
 # =============================================================================
 ScanResult = Tuple[int, List[str]]  # (score, list of reasons)
 
+def _get_short_ratio(jpx_data: Optional[dict]) -> Optional[float]:
+    """
+    Return short_ratio if it is present and parseable, otherwise None.
+
+    Important: missing short data should be treated as neutral (no scoring impact).
+    """
+    if not isinstance(jpx_data, dict):
+        return None
+    if "short_ratio" not in jpx_data:
+        return None
+    value = jpx_data.get("short_ratio")
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
 
 # =============================================================================
 # 1. MOMENTUM STAR
@@ -78,16 +96,17 @@ def scan_momentum_star(
         signals.append(f"Volume Spike ({latest['volume_surge']:.1f}x)")
     
     # 4. Short interest check
-    short_ratio = jpx_data.get('short_ratio', 0) if isinstance(jpx_data, dict) else 0
+    short_ratio = _get_short_ratio(jpx_data)
     low_short = scanner_config.get('MOMENTUM_LOW_SHORT_INTEREST', 0.02)
     high_short = scanner_config.get('MOMENTUM_HIGH_SHORT_WARNING', 0.08)
     
-    if short_ratio < low_short:
-        score += 20
-        signals.append("Low Short Interest")
-    elif short_ratio > high_short:
-        score -= 30
-        signals.append("Warning: High Shorts")
+    if short_ratio is not None:
+        if short_ratio < low_short:
+            score += 20
+            signals.append("Low Short Interest")
+        elif short_ratio > high_short:
+            score -= 30
+            signals.append("Warning: High Shorts")
     
     return (score, signals) if score >= 50 else (0, [])
 
@@ -155,10 +174,10 @@ def scan_reversal_rocket(
         signals.append(f"Reversal Pattern ({pattern_name})")
     
     # 5. High short interest (squeeze fuel)
-    short_ratio = jpx_data.get('short_ratio', 0) if isinstance(jpx_data, dict) else 0
+    short_ratio = _get_short_ratio(jpx_data)
     fuel_threshold = scanner_config.get('REVERSAL_HIGH_SHORT_FUEL', 0.10)
     
-    if short_ratio >= fuel_threshold:
+    if short_ratio is not None and short_ratio >= fuel_threshold:
         score += 30
         signals.append("High Short Interest (Squeeze Fuel)")
     
@@ -489,9 +508,9 @@ def scan_oversold_bounce(
         signals.append(f"Vol {latest['volume_surge']:.1f}x")
     
     # 5. Short interest
-    short_ratio = jpx_data.get('short_ratio', 0) if isinstance(jpx_data, dict) else 0
+    short_ratio = _get_short_ratio(jpx_data)
     short_threshold = scanner_config.get('OVERSOLD_SHORT_INTEREST_MIN', 0.03)
-    if short_ratio >= short_threshold:
+    if short_ratio is not None and short_ratio >= short_threshold:
         score += 15
         signals.append(f"Short {short_ratio*100:.1f}%")
         
@@ -570,8 +589,8 @@ def scan_volatility_explosion(
             signals.append(f"Vol {latest['volume_surge']:.1f}x")
         
         # 4. Short interest adds fuel
-        short_ratio = jpx_data.get('short_ratio', 0) if isinstance(jpx_data, dict) else 0
-        if short_ratio >= 0.03:
+        short_ratio = _get_short_ratio(jpx_data)
+        if short_ratio is not None and short_ratio >= 0.03:
             score += 10
             signals.append("Shorts Trapped")
     
@@ -579,26 +598,26 @@ def scan_volatility_explosion(
 
 
 # =============================================================================
-# 8. POWER COMBINATIONS
+# 8. SMART MONEY FLOW (replaces outdated Power Combinations)
 # =============================================================================
 
-def scan_power_combinations(
+def scan_smart_money_flow(
     data: pd.DataFrame,
     jpx_data: dict,
     scanner_config: dict = None
 ) -> ScanResult:
     """
-    Multiple signals together = higher probability.
+    Identify institutional positioning vs retail behavior.
+    Replaces calendar-based Power Combinations which have degraded.
     
-    Combos:
-        +50: TRIPLE (RSI <= 30 + Volume >= 1.5x + Shorts >= 3%)
-        +40: EXTREME (Momentum <= -8% + Volatility >= 40%)
-        +30: Friday Oversold (Friday + RSI <= 35)
-        +20: Month-end Oversold (day >= 25 + Momentum <= -5%)
+    Signals:
+        +35: Relative strength (holding up while market weak)
+        +30: Consistent volume pattern (institutional accumulation)
+        +35: Price holding key support (near but above SMA50)
     
     Threshold: 50 points minimum
     
-    Source: JP prototype detect_power_combinations()
+    Source: JP prototype detect_smart_money_flow()
     """
     if len(data) < 60:
         return 0, []
@@ -613,36 +632,331 @@ def scan_power_combinations(
     df = ta.calculate_all_indicators(data, scanner_config)
     latest = df.iloc[-1]
     close = data['close']
+    volume = data['volume']
     
-    # Pre-calculate values
-    rsi = latest['rsi']
-    vol_surge = latest['volume_surge']
-    volatility = latest['volatility']
-    short_ratio = jpx_data.get('short_ratio', 0) if isinstance(jpx_data, dict) else 0
+    # A. Relative Strength Analysis (35 points max)
+    if len(close) >= 11:
+        stock_return_10d = (close.iloc[-1] / close.iloc[-11] - 1) * 100
+        min_rs = scanner_config.get('SMART_MONEY_MIN_RELATIVE_STRENGTH', -2)
+        
+        if stock_return_10d > min_rs:  # Not falling much
+            score += 20
+            signals.append(f"Resilient{stock_return_10d:+.1f}%")
+        if stock_return_10d > 0:  # Actually positive
+            score += 15
+            signals.append("Outperforming")
     
-    momentum_10d = (latest['close'] / close.iloc[-10] - 1) * 100 if len(close) >= 10 else 0
+    # B. Volume Distribution Analysis (30 points max)
+    # Consistent volume = institutional; Sporadic = retail
+    if len(volume) >= 20:
+        volume_std = volume.iloc[-20:].std()
+        volume_mean = volume.iloc[-20:].mean()
+        volume_consistency = 1 - (volume_std / volume_mean) if volume_mean > 0 else 0
+        
+        if volume_consistency > 0.3:  # Consistent volume pattern
+            score += 20
+            signals.append("SteadyVol")
+        elif volume_consistency > 0.15:
+            score += 10
+            signals.append("ModerateVol")
     
-    # COMBO 1: Triple threat
-    if rsi <= 30 and vol_surge >= 1.5 and short_ratio >= 0.03:
-        score += 50
-        signals.append("TRIPLE: RSI+Vol+Short")
+    # C. Price Level Holding (35 points max)
+    sma_50 = latest['sma_50']
+    current_price = latest['close']
     
-    # COMBO 2: Extreme oversold + high volatility
-    if momentum_10d <= -8 and volatility >= 40:
-        score += 40
-        signals.append("EXTREME: Oversold+Volatile")
-    
-    # COMBO 3: Friday oversold
-    if datetime.now().weekday() == 4 and rsi <= 35:  # Friday
-        score += 30
-        signals.append("Friday Oversold")
-    
-    # COMBO 4: Month-end oversold
-    if datetime.now().day >= 25 and momentum_10d <= -5:
-        score += 20
-        signals.append("Month-end Oversold")
+    if sma_50 > 0:
+        support_test = (current_price / sma_50 - 1) * 100
+        
+        if -2 <= support_test <= 5:  # Near but above key support
+            score += 25
+            signals.append(f"Support{support_test:+.1f}%")
+        elif support_test > 5:  # Above support
+            score += 10
+            signals.append("AboveMA50")
     
     return (score, signals) if score >= 50 else (0, [])
+
+
+# =============================================================================
+# 9. CRASH THEN BURST (NEW - catches the JP penny stock pattern)
+# =============================================================================
+
+def scan_crash_then_burst(
+    data: pd.DataFrame,
+    jpx_data: dict,
+    scanner_config: dict = None
+) -> ScanResult:
+    """
+    Find stocks that crashed hard and are showing early recovery signs.
+    This is the pattern seen daily in Japanese penny stocks:
+    - Stock drops 30-50% → volume climax → stabilizes → BURSTS 20-30%
+    
+    Signals:
+        +40: Price dropped 25%+ from 20-day high
+        +30: Volume climax occurred (3x+ average on drop)
+        +20: Bottom formation (2-3 days of stabilization)
+        +20: Short interest >= 5% (squeeze fuel)
+        +15: First "green" day with elevated volume
+    
+    Threshold: 70 points (high bar = fewer but better trades)
+    
+    Source: User observation of JP penny stock patterns
+    """
+    if len(data) < 30:
+        return 0, []
+    
+    if scanner_config is None:
+        scanner_config = config.SCANNER_CONFIG
+    
+    score = 0
+    signals = []
+    
+    close = data['close']
+    volume = data['volume']
+    high = data['high']
+    
+    current_price = close.iloc[-1]
+    
+    # 1. CRASH CHECK: Price dropped 25%+ from recent high (+40 points)
+    high_20d = high.iloc[-20:].max()
+    crash_pct = (current_price / high_20d - 1) * 100
+    
+    crash_threshold = scanner_config.get('CRASH_MIN_DROP_PCT', -25)
+    
+    if crash_pct <= crash_threshold:  # Dropped 25%+
+        score += 40
+        signals.append(f"Crashed{crash_pct:.0f}%")
+    elif crash_pct <= -15:  # Moderate drop
+        score += 20
+        signals.append(f"Dropped{crash_pct:.0f}%")
+    else:
+        # No crash = no signal
+        return 0, []
+    
+    # 2. VOLUME CLIMAX: Did we see capitulation volume during the drop? (+30 points)
+    avg_volume = volume.iloc[-30:-5].mean() if len(volume) >= 30 else volume.mean()
+    max_volume_recent = volume.iloc[-10:].max()
+    volume_spike = max_volume_recent / avg_volume if avg_volume > 0 else 0
+    
+    climax_threshold = scanner_config.get('CRASH_VOLUME_CLIMAX', 3.0)
+    
+    if volume_spike >= climax_threshold:
+        score += 30
+        signals.append(f"Climax{volume_spike:.1f}x")
+    elif volume_spike >= 2.0:
+        score += 15
+        signals.append(f"HighVol{volume_spike:.1f}x")
+    
+    # 3. BOTTOM FORMATION: Has price stabilized? (+20 points)
+    # Look for 2-3 days where low doesn't make new lows
+    recent_lows = data['low'].iloc[-5:]
+    low_3d = recent_lows.iloc[-3:].min()
+    low_prior = recent_lows.iloc[:2].min()
+    
+    if low_3d >= low_prior * 0.99:  # Not making new lows
+        score += 20
+        signals.append("Stabilizing")
+    
+    # 4. SHORT INTEREST: Squeeze fuel (+20 points)
+    short_ratio = _get_short_ratio(jpx_data)
+    
+    squeeze_threshold = scanner_config.get('CRASH_SHORT_SQUEEZE_MIN', 0.05)
+    
+    if short_ratio is not None and short_ratio >= squeeze_threshold:
+        score += 20
+        signals.append(f"Shorts{short_ratio*100:.1f}%")
+    elif short_ratio is not None and short_ratio >= 0.03:
+        score += 10
+        signals.append(f"Short{short_ratio*100:.1f}%")
+    
+    # 5. RECOVERY SIGN: First green day with volume (+15 points)
+    if len(close) >= 2:
+        today_green = close.iloc[-1] > close.iloc[-2]
+        today_vol = volume.iloc[-1]
+        avg_vol = volume.iloc[-20:].mean() if len(volume) >= 20 else volume.mean()
+        
+        if today_green and today_vol > avg_vol * 1.2:
+            score += 15
+            signals.append("GreenWithVol")
+    
+    # Higher threshold for this pattern
+    return (score, signals) if score >= 70 else (0, [])
+
+
+# =============================================================================
+# 10. STEALTH ACCUMULATION (from original prototype)
+# =============================================================================
+
+def scan_stealth_accumulation(
+    data: pd.DataFrame,
+    jpx_data: dict,
+    scanner_config: dict = None
+) -> ScanResult:
+    """
+    Find gradual institutional buying without obvious price spikes.
+    Institutions accumulate quietly before the move.
+    
+    Signals:
+        +30: Volume increasing 15%+ while price stable
+        +25: Volatility compression 20%+ (coiling)
+        +20: Subtle bullish bias (55-65% up days)
+        +15: Low short interest (institutions aren't fighting shorts)
+    
+    Threshold: 50 points minimum
+    
+    Source: JP prototype detect_stealth_accumulation()
+    """
+    if len(data) < 60:
+        return 0, []
+    
+    if scanner_config is None:
+        scanner_config = config.SCANNER_CONFIG
+    
+    score = 0
+    signals = []
+    
+    close = data['close']
+    volume = data['volume']
+    
+    # A. Volume-Price Divergence (30 points max)
+    # Volume increasing while price flat = accumulation
+    volume_ma_short = volume.iloc[-10:].mean()
+    volume_ma_long = volume.iloc[-30:].mean() if len(volume) >= 30 else volume.mean()
+    
+    volume_trend = (volume_ma_short / volume_ma_long - 1) * 100 if volume_ma_long > 0 else 0
+    
+    stealth_min_vol = scanner_config.get('STEALTH_MIN_VOLUME_INCREASE', 15)
+    
+    if volume_trend > stealth_min_vol:  # Volume increasing 15%+
+        score += 30
+        signals.append(f"Vol↑{volume_trend:.0f}%")
+    elif volume_trend > 5:
+        score += 15
+        signals.append(f"Vol+{volume_trend:.0f}%")
+    
+    # B. Price Volatility Compression (25 points max)
+    if len(close) >= 60:
+        volatility_20d = close.iloc[-20:].std() / close.iloc[-20:].mean()
+        volatility_60d = close.iloc[-60:].std() / close.iloc[-60:].mean()
+        vol_compression = (1 - volatility_20d / volatility_60d) * 100 if volatility_60d > 0 else 0
+        
+        stealth_min_comp = scanner_config.get('STEALTH_MIN_VOLATILITY_COMPRESSION', 20)
+        
+        if vol_compression > stealth_min_comp:  # Volatility compressed 20%+
+            score += 25
+            signals.append(f"Squeeze{vol_compression:.0f}%")
+        elif vol_compression > 10:
+            score += 15
+            signals.append(f"Tighten{vol_compression:.0f}%")
+    
+    # C. Consistent Positive Bias (20 points max)
+    if len(close) >= 21:
+        up_days = sum(close.iloc[-20:].diff().dropna() > 0)
+        win_rate = up_days / 20
+        
+        stealth_wr_min = scanner_config.get('STEALTH_WIN_RATE_MIN', 0.55)
+        stealth_wr_max = scanner_config.get('STEALTH_WIN_RATE_MAX', 0.65)
+        
+        if stealth_wr_min <= win_rate <= stealth_wr_max:  # Subtle bullish bias
+            score += 20
+            signals.append(f"Bias{win_rate*100:.0f}%")
+    
+    # D. Low Short Interest (15 points max)
+    short_ratio = _get_short_ratio(jpx_data)
+    if short_ratio is not None and 0 < short_ratio < 0.03:  # Low but present
+        score += 15
+        signals.append("LowShorts")
+    
+    return (score, signals) if score >= 50 else (0, [])
+
+
+# =============================================================================
+# 11. COILING PATTERN (from original prototype)
+# =============================================================================
+
+def scan_coiling_pattern(
+    data: pd.DataFrame,
+    jpx_data: dict,
+    scanner_config: dict = None
+) -> ScanResult:
+    """
+    Find stocks coiling for explosive moves.
+    Bollinger Band squeeze + ATR compression = energy building.
+    
+    Signals:
+        +40: Bollinger Band squeeze 30%+ vs 60-day average
+        +30: ATR compression 25%+
+        +20: Volume building (not declining)
+    
+    Threshold: 60 points minimum (high bar for quality)
+    
+    Source: JP prototype detect_coiling_pattern()
+    """
+    if len(data) < 60:
+        return 0, []
+    
+    if scanner_config is None:
+        scanner_config = config.SCANNER_CONFIG
+    
+    score = 0
+    signals = []
+    
+    close = data['close']
+    volume = data['volume']
+    
+    # A. Bollinger Band Squeeze Detection (40 points max)
+    bb_period = 20
+    bb_std = 2
+    
+    sma = close.rolling(bb_period).mean()
+    std = close.rolling(bb_period).std()
+    bb_upper = sma + (std * bb_std)
+    bb_lower = sma - (std * bb_std)
+    bb_width = (bb_upper - bb_lower) / close * 100
+    
+    current_width = bb_width.iloc[-1]
+    avg_width_60d = bb_width.iloc[-60:].mean() if len(bb_width) >= 60 else bb_width.mean()
+    
+    squeeze_ratio = (1 - current_width / avg_width_60d) * 100 if avg_width_60d > 0 else 0
+    
+    coiling_min_bb = scanner_config.get('COILING_MIN_BB_SQUEEZE', 30)
+    
+    if squeeze_ratio > coiling_min_bb:  # 30%+ compression
+        score += 40
+        signals.append(f"BBSqueeze{squeeze_ratio:.0f}%")
+    elif squeeze_ratio > 15:
+        score += 25
+        signals.append(f"BBTight{squeeze_ratio:.0f}%")
+    
+    # B. ATR Contraction (30 points max)
+    high_low = data['high'] - data['low']
+    atr_current = high_low.iloc[-10:].mean()
+    atr_historical = high_low.iloc[-50:].mean() if len(high_low) >= 50 else high_low.mean()
+    
+    atr_compression = (1 - atr_current / atr_historical) * 100 if atr_historical > 0 else 0
+    
+    coiling_min_atr = scanner_config.get('COILING_MIN_ATR_COMPRESSION', 25)
+    
+    if atr_compression > coiling_min_atr:
+        score += 30
+        signals.append(f"ATRCoil{atr_compression:.0f}%")
+    elif atr_compression > 10:
+        score += 15
+        signals.append(f"ATRTight{atr_compression:.0f}%")
+    
+    # C. Volume Building Pattern (20 points max)
+    vol_trend_10d = volume.iloc[-10:].mean()
+    vol_trend_30d = volume.iloc[-30:].mean() if len(volume) >= 30 else volume.mean()
+    vol_pattern = (vol_trend_10d / vol_trend_30d - 1) * 100 if vol_trend_30d > 0 else 0
+    
+    if vol_pattern > 10:  # Volume building
+        score += 20
+        signals.append(f"VolBuild{vol_pattern:.0f}%")
+    elif vol_pattern > -5:  # Volume steady (not declining)
+        score += 10
+        signals.append("VolSteady")
+    
+    return (score, signals) if score >= 60 else (0, [])
 
 
 # =============================================================================
@@ -654,7 +968,8 @@ def get_all_signals(
     data: pd.DataFrame,
     jpx_data: dict,
     scanner_config: dict = None,
-    min_score: int = None
+    min_score: int = None,
+    early_mode: Optional[bool] = None,
 ) -> List[Dict]:
     """
     Run all scanners and return list of qualifying signals.
@@ -678,32 +993,63 @@ def get_all_signals(
         scanner_config = config.SCANNER_CONFIG
     
     if min_score is None:
-        min_score = config.MIN_SCORE
+        min_score = config.MIN_SCANNER_SCORE
     
     # Ensure jpx_data is a dict
     if not isinstance(jpx_data, dict):
-        jpx_data = {'short_ratio': 0}
-    
+        jpx_data = {}
+
+    # Determine early mode (pre-burst) filter
+    if early_mode is None:
+        early_mode = getattr(config, "EARLY_MODE_ENABLED", False)
+
+    if early_mode:
+        rsi_max = getattr(config, "EARLY_MODE_RSI_MAX", 65)
+        return_max = getattr(config, "EARLY_MODE_10D_RETURN_MAX", 0.15)
+        df = ta.calculate_all_indicators(data, scanner_config)
+        if len(df) < 11:
+            return []
+        latest_rsi = df['rsi'].iloc[-1]
+        if latest_rsi > rsi_max:
+            return []
+        ret_10d = (df['close'].iloc[-1] / df['close'].iloc[-11]) - 1
+        if ret_10d >= return_max:
+            return []
+
     signals = []
     
     scanners = [
+        # Original trend-following scanners
         ('momentum_star', scan_momentum_star),
-        ('reversal_rocket', scan_reversal_rocket),
         ('consolidation_breakout', scan_consolidation_breakout),
         ('relative_strength', scan_relative_strength),
         ('burst_candidates', scan_burst_candidates),
+        
+        # Mean-reversion scanners
+        ('reversal_rocket', scan_reversal_rocket),
         ('oversold_bounce', scan_oversold_bounce),
         ('volatility_explosion', scan_volatility_explosion),
-        ('power_combinations', scan_power_combinations),
+        
+        # Advanced detection
+        ('smart_money_flow', scan_smart_money_flow),
+        # DISABLED (PF 0.00): ('crash_then_burst', scan_crash_then_burst),
+        # DISABLED (PF 0.00): ('stealth_accumulation', scan_stealth_accumulation),
+        ('coiling_pattern', scan_coiling_pattern),
     ]
+
+    if early_mode:
+        early_scanners = set(getattr(config, "EARLY_MODE_SCANNERS", []))
+        if early_scanners:
+            scanners = [s for s in scanners if s[0] in early_scanners]
     
     for name, scanner_func in scanners:
         try:
             score, reasons = scanner_func(data, jpx_data, scanner_config)
-            if score >= min_score:
+            if score > 0 and (min_score is None or score >= min_score):
                 signals.append({
                     'symbol': symbol,
                     'strategy': name,
+                    'scanner_name': name,  # Explicit scanner tracking
                     'score': score,
                     'reasons': reasons,
                     'price': data['close'].iloc[-1] if len(data) > 0 else 0,
@@ -711,6 +1057,34 @@ def get_all_signals(
         except Exception as e:
             # Log but don't fail the whole scan
             continue
+    
+    # === CONFLUENCE BONUS ===
+    # When multiple scanners agree, boost the best signal
+    if len(signals) >= 2:
+        # Count how many scanners fired
+        num_scanners = len(signals)
+        all_scanner_names = [s['strategy'] for s in signals]
+        
+        # Calculate confluence bonus (10 points per additional scanner)
+        confluence_bonus = (num_scanners - 1) * 10
+        
+        # Sort by original score to find the best
+        signals.sort(key=lambda x: x['score'], reverse=True)
+        
+        # Apply bonus to the best signal
+        best_signal = signals[0]
+        best_signal['score'] += confluence_bonus
+        best_signal['confluence_count'] = num_scanners
+        best_signal['confluence_scanners'] = all_scanner_names
+        best_signal['reasons'].append(
+            f"CONFLUENCE: {num_scanners} scanners agree (+{confluence_bonus}pts)"
+        )
+        
+        # Keep only the best (confluent) signal
+        signals = [best_signal]
+    elif len(signals) == 1:
+        signals[0]['confluence_count'] = 1
+        signals[0]['confluence_scanners'] = [signals[0]['strategy']]
     
     # Sort by score descending
     signals.sort(key=lambda x: x['score'], reverse=True)
@@ -723,7 +1097,8 @@ def scan_universe(
     jpx_data: Dict[str, dict],
     scanner_config: dict = None,
     min_score: int = None,
-    progress: bool = False
+    progress: bool = False,
+    early_mode: Optional[bool] = None,
 ) -> List[Dict]:
     """
     Scan multiple symbols and aggregate all signals.
@@ -745,9 +1120,12 @@ def scan_universe(
         from tqdm import tqdm
         iterator = tqdm(iterator, desc="Scanning symbols")
     
+    if not isinstance(jpx_data, dict):
+        jpx_data = {}
+
     for symbol, data in iterator:
-        symbol_jpx = jpx_data.get(symbol, {'short_ratio': 0})
-        signals = get_all_signals(symbol, data, symbol_jpx, scanner_config, min_score)
+        symbol_jpx = jpx_data.get(symbol)
+        signals = get_all_signals(symbol, data, symbol_jpx, scanner_config, min_score, early_mode)
         all_signals.extend(signals)
     
     # Sort all signals by score

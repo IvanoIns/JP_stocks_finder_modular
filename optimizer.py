@@ -15,7 +15,7 @@ import logging
 
 import config
 import data_manager as dm
-from backtesting import run_daily_backtest, BacktestEngine
+from backtesting import run_daily_backtest, run_fast_backtest, BacktestEngine
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +23,47 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 # Grid Search
 # =============================================================================
+
+def _is_precomputed_compatible(
+    precomputed,
+    rsi_max_values: List[int],
+    volume_surge_values: List[float],
+    min_score_values: List[int],
+) -> bool:
+    if precomputed is None:
+        return True
+
+    precomputed_scanner_config = getattr(precomputed, "scanner_config", None)
+    precomputed_min_score = getattr(precomputed, "min_score", None)
+
+    if not precomputed_scanner_config or precomputed_min_score is None:
+        logger.warning("Precomputed cache missing metadata; disabling fast mode for correctness.")
+        return False
+
+    unique_rsi = set(rsi_max_values) if rsi_max_values else set()
+    unique_vol = set(volume_surge_values) if volume_surge_values else set()
+    unique_min_score = set(min_score_values) if min_score_values else set()
+
+    if len(unique_rsi) != 1 or len(unique_vol) != 1 or len(unique_min_score) != 1:
+        logger.warning("Parameter grid varies scanner/min_score; disabling fast mode for correctness.")
+        return False
+
+    rsi_max = unique_rsi.pop()
+    vol_surge = unique_vol.pop()
+    min_score = unique_min_score.pop()
+
+    if precomputed_scanner_config.get('MOMENTUM_RSI_MAX') != rsi_max:
+        logger.warning("Precomputed cache uses different MOMENTUM_RSI_MAX; disabling fast mode.")
+        return False
+    if precomputed_scanner_config.get('MOMENTUM_VOLUME_SPIKE_FACTOR') != vol_surge:
+        logger.warning("Precomputed cache uses different MOMENTUM_VOLUME_SPIKE_FACTOR; disabling fast mode.")
+        return False
+    if precomputed_min_score != min_score:
+        logger.warning("Precomputed cache uses different min_score; disabling fast mode.")
+        return False
+
+    return True
+
 
 def grid_search_daily(
     start_date: str,
@@ -34,6 +75,7 @@ def grid_search_daily(
     min_score_values: List[int] = None,
     stop_loss_values: List[float] = None,
     exit_modes: List[str] = None,
+    risk_reward_ratios: List[float] = None,  # NEW: R:R ratios
     # Fixed params
     top_n: int = None,
     max_positions: int = None,
@@ -43,6 +85,7 @@ def grid_search_daily(
     max_drawdown_cap: float = None,
     # Options
     progress: bool = True,
+    precomputed = None,  # PrecomputedData object (optional)
 ) -> pd.DataFrame:
     """
     Run grid search over parameter combinations.
@@ -62,6 +105,7 @@ def grid_search_daily(
         min_win_rate: Minimum win rate constraint
         max_drawdown_cap: Maximum drawdown constraint
         progress: Show progress bar
+        precomputed: Optional PrecomputedData for 10-100x speedup
     
     Returns:
         DataFrame with all combinations and their metrics
@@ -77,6 +121,8 @@ def grid_search_daily(
         stop_loss_values = [0.04, 0.05, 0.06]
     if exit_modes is None:
         exit_modes = ['default', 'trailing']
+    if risk_reward_ratios is None:
+        risk_reward_ratios = [2.0]  # Default 2:1 R:R
     if top_n is None:
         top_n = config.UNIVERSE_TOP_N
     if max_positions is None:
@@ -87,6 +133,11 @@ def grid_search_daily(
         min_win_rate = config.MIN_WIN_RATE
     if max_drawdown_cap is None:
         max_drawdown_cap = config.MAX_DRAWDOWN_CAP
+
+    if precomputed and not _is_precomputed_compatible(
+        precomputed, rsi_max_values, volume_surge_values, min_score_values
+    ):
+        precomputed = None
     
     # Generate all combinations
     combinations = list(product(
@@ -95,6 +146,7 @@ def grid_search_daily(
         min_score_values,
         stop_loss_values,
         exit_modes,
+        risk_reward_ratios,  # NEW
     ))
     
     logger.info(f"Grid search: {len(combinations)} combinations")
@@ -104,26 +156,45 @@ def grid_search_daily(
     if progress:
         iterator = tqdm(combinations, desc="Grid search")
     
-    for rsi_max, vol_surge, min_score, stop_loss, exit_mode in iterator:
+    for rsi_max, vol_surge, min_score, stop_loss, exit_mode, rr_ratio in iterator:
         # Create scanner config for this combo
         scanner_config = config.get_scanner_config()
         scanner_config['MOMENTUM_RSI_MAX'] = rsi_max
         scanner_config['MOMENTUM_VOLUME_SPIKE_FACTOR'] = vol_surge
         
         try:
-            # Run backtest
-            engine, metrics = run_daily_backtest(
-                start_date=start_date,
-                end_date=end_date,
-                initial_balance=initial_balance,
-                top_n=top_n,
-                max_positions=max_positions,
-                stop_loss_pct=stop_loss,
-                exit_mode=exit_mode,
-                min_score=min_score,
-                scanner_config=scanner_config,
-                progress=False,
-            )
+            # Run backtest (FAST or SLOW)
+            if precomputed:
+                # Fast mode (RAM-based)
+                engine, metrics = run_fast_backtest(
+                    precomputed=precomputed,
+                    initial_balance=initial_balance,
+                    max_positions=max_positions,
+                    stop_loss_pct=stop_loss,
+                    exit_mode=exit_mode,
+                    min_score=min_score,
+                    scanner_config=scanner_config,
+                    progress=False,
+                    start_date=start_date,
+                    end_date=end_date,
+                    risk_reward_ratio=rr_ratio,  # NEW
+                )
+            else:
+                # Slow mode (DB-based)
+                engine, metrics = run_daily_backtest(
+                    start_date=start_date,
+                    end_date=end_date,
+                    initial_balance=initial_balance,
+                    top_n=top_n,
+                    max_positions=max_positions,
+                    stop_loss_pct=stop_loss,
+                    exit_mode=exit_mode,
+                    min_score=min_score,
+                    scanner_config=scanner_config,
+                    progress=False,
+                    risk_reward_ratio=rr_ratio,  # NEW
+                )
+
             
             # Check constraints
             passed = (
@@ -138,6 +209,7 @@ def grid_search_daily(
                 'min_score': min_score,
                 'stop_loss': stop_loss,
                 'exit_mode': exit_mode,
+                'risk_reward_ratio': rr_ratio,  # NEW
                 'profit_factor': metrics['profit_factor'],
                 'win_rate': metrics['win_rate'],
                 'total_trades': metrics['total_trades'],
@@ -212,6 +284,7 @@ def walk_forward_grid_search(
     min_score_values: List[int] = None,
     stop_loss_values: List[float] = None,
     exit_modes: List[str] = None,
+    risk_reward_ratios: List[float] = None,
     # Fixed params
     top_n: int = None,
     max_positions: int = None,
@@ -223,6 +296,7 @@ def walk_forward_grid_search(
     # Options
     progress: bool = True,
     log_to_db: bool = True,
+    precomputed = None, # PrecomputedData object (optional)
 ) -> pd.DataFrame:
     """
     Walk-forward analysis with rolling windows.
@@ -250,6 +324,13 @@ def walk_forward_grid_search(
         stop_loss_values = [0.04, 0.05, 0.06]
     if exit_modes is None:
         exit_modes = ['default', 'trailing']
+    if risk_reward_ratios is None:
+        risk_reward_ratios = [1.5, 2.0, 2.5]
+
+    if precomputed and not _is_precomputed_compatible(
+        precomputed, rsi_max_values, volume_surge_values, min_score_values
+    ):
+        precomputed = None
     
     logger.info(f"Walk-forward analysis: {len(windows)} windows")
     
@@ -269,12 +350,14 @@ def walk_forward_grid_search(
             min_score_values=min_score_values,
             stop_loss_values=stop_loss_values,
             exit_modes=exit_modes,
+            risk_reward_ratios=risk_reward_ratios,
             top_n=top_n,
             max_positions=max_positions,
             min_trades=min_trades,
             min_win_rate=min_win_rate,
             max_drawdown_cap=max_drawdown_cap,
             progress=False,
+            precomputed=precomputed,
         )
         
         if len(train_results) == 0:
@@ -295,18 +378,34 @@ def walk_forward_grid_search(
         scanner_config['MOMENTUM_VOLUME_SPIKE_FACTOR'] = best['volume_surge']
         
         try:
-            test_engine, test_metrics = run_daily_backtest(
-                start_date=test_start,
-                end_date=test_end,
-                initial_balance=initial_balance,
-                top_n=top_n,
-                max_positions=max_positions,
-                stop_loss_pct=best['stop_loss'],
-                exit_mode=best['exit_mode'],
-                min_score=int(best['min_score']),
-                scanner_config=scanner_config,
-                progress=False,
-            )
+            if precomputed:
+                 test_engine, test_metrics = run_fast_backtest(
+                    precomputed=precomputed,
+                    initial_balance=initial_balance,
+                    max_positions=max_positions,
+                    stop_loss_pct=best['stop_loss'],
+                    exit_mode=best['exit_mode'],
+                    min_score=int(best['min_score']),
+                    scanner_config=scanner_config,
+                    progress=False,
+                    start_date=test_start,
+                    end_date=test_end,
+                )
+            else:
+                test_engine, test_metrics = run_daily_backtest(
+                    start_date=test_start,
+                    end_date=test_end,
+                    initial_balance=initial_balance,
+                    top_n=top_n,
+                    max_positions=max_positions,
+                    stop_loss_pct=best['stop_loss'],
+                    exit_mode=best['exit_mode'],
+                    min_score=int(best['min_score']),
+                    scanner_config=scanner_config,
+                    progress=False,
+                    risk_reward_ratio=best.get('risk_reward_ratio', 2.0),
+                )
+
             
             results.append({
                 'window_id': i,
@@ -320,6 +419,7 @@ def walk_forward_grid_search(
                 'pick_min_score': best['min_score'],
                 'pick_stop_loss': best['stop_loss'],
                 'pick_exit_mode': best['exit_mode'],
+                'pick_risk_reward': best.get('risk_reward_ratio', 2.0),
                 # Train metrics
                 'train_pf': best['profit_factor'],
                 'train_wr': best['win_rate'],
@@ -425,7 +525,7 @@ def top_params_by_stability(
     
     # Group by parameter combination
     param_cols = ['pick_rsi_max', 'pick_vol_surge', 'pick_min_score', 
-                  'pick_stop_loss', 'pick_exit_mode']
+                  'pick_stop_loss', 'pick_exit_mode', 'pick_risk_reward']
     
     grouped = ok.groupby(param_cols).agg({
         'test_pf': ['mean', 'median', 'count'],
