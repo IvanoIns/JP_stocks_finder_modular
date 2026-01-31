@@ -12,6 +12,9 @@ Usage:
 """
 
 import argparse
+import json
+import csv
+from datetime import datetime
 import sys
 import sqlite3
 from pathlib import Path
@@ -565,6 +568,55 @@ def generate_signals_with_research(top_n: int = 20):
                     print(f"   - {risk}")
             
             print(f"\nSENTIMENT: {res.news_sentiment}")
+
+    # === OPTIONAL SAVE ===
+    if getattr(config, "SAVE_LLM_RESULTS", True):
+        results_dir = Path(getattr(config, "RESULTS_DIR", Path("results")))
+        results_dir.mkdir(exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_path = results_dir / f"llm_research_{ts}.json"
+
+        def _serialize_result(item: dict) -> dict:
+            sig = item["signal"]
+            res = item["research"]
+            return {
+                "symbol": sig.get("symbol"),
+                "strategy": sig.get("strategy"),
+                "score": sig.get("score"),
+                "entry_price": sig.get("entry_price", sig.get("price")),
+                "entry_source": sig.get("entry_source", "close_est"),
+                "confluence_scanners": sig.get("confluence_scanners", []),
+                "news_sentiment": res.news_sentiment if res.success else "N/A",
+                "recent_news_summary": res.recent_news_summary if res.success else "",
+                "upcoming_catalysts": res.upcoming_catalysts if res.success else [],
+                "key_risks": res.key_risks if res.success else [],
+                "error": res.error_message if not res.success else "",
+            }
+
+        payload = {
+            "run_timestamp": ts,
+            "latest_date": latest_date,
+            "min_score": min_score,
+            "stop_loss_pct": stop_loss_pct,
+            "risk_reward_ratio": rr_ratio,
+            "early_mode_enabled": config.EARLY_MODE_ENABLED,
+            "results": [_serialize_result(x) for x in research_results],
+        }
+
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        print(f"\nSaved LLM results to: {out_path}")
+
+        # Also save CSV
+        csv_path = results_dir / f"llm_research_{ts}.csv"
+        rows = payload["results"]
+        if rows:
+            fieldnames = list(rows[0].keys())
+            with open(csv_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
+            print(f"Saved LLM results to: {csv_path}")
     
     # === FINAL RANKING ===
     print("\n" + "=" * 70)
@@ -644,6 +696,9 @@ def generate_signals_with_research(top_n: int = 20):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate signals with LLM research")
     parser.add_argument("--top", type=int, default=20, help="Number of top picks to research")
+    parser.add_argument("--no-save", action="store_true", help="Disable saving LLM results to results/")
     args = parser.parse_args()
-    
+    if args.no_save:
+        setattr(config, "SAVE_LLM_RESULTS", False)
+
     generate_signals_with_research(top_n=args.top)

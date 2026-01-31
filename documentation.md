@@ -66,7 +66,7 @@ Signal generation is cache-based for speed.
 
 1. Update DB: `python -c "import data_manager as dm; dm.update_recent_data(days=5)"`
 2. Rebuild cache: `python precompute.py` (auto-expands DB + updates market caps each run)
-3. Generate signals: `python generate_signals.py` (scanner only) or `python generate_signals_with_research.py` (scanner + LLM)
+3. Generate signals: `python generate_signals.py` (scanner only) or `python generate_signals_with_research.py` (scanner + LLM, auto-saves to `results/llm_research_*.json` and `.csv`)
 
 Stops/targets are % based (6% stop, 2R target) and should be computed from your actual entry fill at the open.
 Output is split into lot-affordable vs over-budget picks using `MAX_JPY_PER_TRADE` and `LOT_SIZE` from `config.py`.

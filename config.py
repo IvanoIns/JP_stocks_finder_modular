@@ -54,6 +54,9 @@ AUTO_EXPAND_DB_SHUFFLE = True
 # If True, cache stores all triggered signals (score > 0) and filters later by MIN_SCANNER_SCORE.
 CACHE_RAW_SIGNALS = True
 
+# Save LLM research results to results/llm_research_YYYYMMDD_HHMMSS.json
+SAVE_LLM_RESULTS = True
+
 # =============================================================================
 # Market Cap Ingestion (for universe filter)
 # =============================================================================

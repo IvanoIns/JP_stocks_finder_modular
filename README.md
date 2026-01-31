@@ -68,7 +68,7 @@ JP_stocks_modular/
 
 1. **Update DB**: `python -c "import data_manager as dm; dm.update_recent_data(days=5)"`
 2. **Rebuild Cache**: `python precompute.py` (auto-expands DB + updates market caps each run)
-3. **Run Generator**: `python generate_signals_with_research.py`
+3. **Run Generator**: `python generate_signals_with_research.py` (auto-saves LLM results to `results/llm_research_*.json` and `.csv`)
 4. **Review Output**:
    - Check **Adjusted Score** (Scanner + AI Bonus)
    - Read **News Summary** & **Risks**
