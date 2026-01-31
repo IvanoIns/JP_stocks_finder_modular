@@ -100,6 +100,16 @@ def _warn_if_cache_mismatch(precomputed) -> None:
             )
 
 
+def _get_latest_date_with_signals(precomputed) -> str | None:
+    """
+    Return the most recent trading date that has at least one cached signal.
+    """
+    for date in reversed(precomputed.trading_dates):
+        if precomputed.signals_by_date.get(date):
+            return date
+    return None
+
+
 def _get_budget_params() -> tuple[float, int]:
     max_jpy = getattr(config, "MAX_JPY_PER_TRADE", 100_000)
     lot_size = getattr(config, "LOT_SIZE", 100)
@@ -215,9 +225,13 @@ def generate_signals():
     print(f"   Symbols: {precomputed.num_symbols}")
     print(f"   Date range: {precomputed.start_date} to {precomputed.end_date}")
     
-    # Get the most recent trading date
-    latest_date = precomputed.trading_dates[-1]
-    print(f"\nLatest data: {latest_date}")
+    # Get the most recent trading date that actually has signals
+    latest_date = _get_latest_date_with_signals(precomputed) or precomputed.trading_dates[-1]
+    if latest_date != precomputed.trading_dates[-1]:
+        print(f"\nLatest data (with signals): {latest_date}")
+        print(f"   NOTE: Latest DB date has no signals; using most recent signal date.")
+    else:
+        print(f"\nLatest data: {latest_date}")
     print(f"   Signals generated for NEXT trading day")
 
     _warn_if_cache_mismatch(precomputed)

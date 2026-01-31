@@ -69,13 +69,17 @@ JP_stocks_modular/
 1. **Update DB**: `python -c "import data_manager as dm; dm.update_recent_data(days=5)"`
 2. **Rebuild Cache**: `python precompute.py` (auto-expands DB + updates market caps each run)
 3. **Run Generator**: `python generate_signals_with_research.py` (auto-saves LLM results to `results/llm_research_*.json` and `.csv`)
-4. **Review Output**:
+4. **Plot Charts (optional)**: `python plot_signals_charts.py --top 20 --days 180`
+5. **Terminal Dashboard (optional)**: `python signals_dashboard.py --top 20 --days 180`
+6. **Streamlit Dashboard (recommended)**: `streamlit run streamlit_dashboard.py`  
+   - If the dashboard is empty, pick a **date with signals** (checkbox is on by default) or lower **Min Score**.
+7. **Review Output**:
    - Check **Adjusted Score** (Scanner + AI Bonus)
    - Read **News Summary** & **Risks**
    - Verify **Confluence** count
    - Review **budget split** (lot-affordable vs over-budget) using `MAX_JPY_PER_TRADE` and `LOT_SIZE`
    - Entry uses **next open** when available; if not, last close is marked with `*`
-5. **Execute Trades**:
+7. **Execute Trades**:
    - Entry: Market Open (use your actual fill to set stop/target)
    - Stop: -6%
    - Target: +12%

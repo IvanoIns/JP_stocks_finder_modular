@@ -50,7 +50,7 @@
 3. [x] **Early Mode default**: Pre-burst filters (10D return < 15%, RSI <= 65) + early scanner subset, with optional legacy output.
 4. [x] **Universe definition enforcement**: Enforce `MAX_MARKET_CAP_JPY` when market-cap data exists; missing caps pass by default.
 5. [x] **Cache supports `min_score` optimization**: Cache stores raw signals (score > 0) and filters by `MIN_SCANNER_SCORE` at runtime.
-6. [ ] **Signal output vs real entry**: Make stops/targets explicitly based on actual next-open fill (or output % only + optional CSV for paper trading).
+6. [x] **Signal output vs real entry**: Stops/targets use next-day open when available; otherwise last close is marked with `*`.
 
 ### Ongoing (Paper Trading)
 
@@ -61,4 +61,4 @@
 
 ---
 
-*Last updated: 2026-01-29*
+*Last updated: 2026-01-31*

@@ -67,6 +67,10 @@ Signal generation is cache-based for speed.
 1. Update DB: `python -c "import data_manager as dm; dm.update_recent_data(days=5)"`
 2. Rebuild cache: `python precompute.py` (auto-expands DB + updates market caps each run)
 3. Generate signals: `python generate_signals.py` (scanner only) or `python generate_signals_with_research.py` (scanner + LLM, auto-saves to `results/llm_research_*.json` and `.csv`)
+4. Plot charts (optional): `python plot_signals_charts.py --top 20 --days 180`
+5. Terminal dashboard (optional): `python signals_dashboard.py --top 20 --days 180`
+6. Streamlit dashboard (recommended): `streamlit run streamlit_dashboard.py`  
+   - If empty, select a **date with signals** (checkbox on by default) or lower **Min Score**.
 
 Stops/targets are % based (6% stop, 2R target) and should be computed from your actual entry fill at the open.
 Output is split into lot-affordable vs over-budget picks using `MAX_JPY_PER_TRADE` and `LOT_SIZE` from `config.py`.
@@ -128,4 +132,4 @@ bonus = (num_scanners - 1) * 10
 
 ---
 
-*Last updated: 2026-01-29*
+*Last updated: 2026-01-31*
