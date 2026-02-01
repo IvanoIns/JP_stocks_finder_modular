@@ -623,10 +623,10 @@ def update_market_caps_incremental(
                 cursor.execute(
                     """
                     INSERT INTO symbol_info (symbol, name, sector, market_cap, last_updated)
-                    VALUES (?, COALESCE(?, name), COALESCE(?, sector), ?, ?)
+                    VALUES (?, ?, ?, ?, ?)
                     ON CONFLICT(symbol) DO UPDATE SET
-                        name = COALESCE(excluded.name, name),
-                        sector = COALESCE(excluded.sector, sector),
+                        name = COALESCE(excluded.name, symbol_info.name),
+                        sector = COALESCE(excluded.sector, symbol_info.sector),
                         market_cap = excluded.market_cap,
                         last_updated = excluded.last_updated
                     """,
