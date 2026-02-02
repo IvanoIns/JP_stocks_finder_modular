@@ -226,10 +226,12 @@ def generate_signals():
     print(f"   Date range: {precomputed.start_date} to {precomputed.end_date}")
     
     # Get the most recent trading date that actually has signals
-    latest_date = _get_latest_date_with_signals(precomputed) or precomputed.trading_dates[-1]
-    if latest_date != precomputed.trading_dates[-1]:
-        print(f"\nLatest data (with signals): {latest_date}")
-        print(f"   NOTE: Latest DB date has no signals; using most recent signal date.")
+    latest_db_date = precomputed.trading_dates[-1]
+    latest_signal_date = _get_latest_date_with_signals(precomputed)
+    latest_date = latest_signal_date or latest_db_date
+    if latest_signal_date and latest_signal_date != latest_db_date:
+        print(f"\nLatest data: {latest_db_date}")
+        print(f"   No signals for {latest_db_date}. Falling back to {latest_signal_date}.")
     else:
         print(f"\nLatest data: {latest_date}")
     print(f"   Signals generated for NEXT trading day")

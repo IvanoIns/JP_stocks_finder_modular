@@ -25,8 +25,8 @@ def _run(cmd: list[str]) -> int:
 # =========================
 # Editable defaults (toggles)
 # =========================
-RUN_EXPAND_DB = True
-RUN_FILL_MARKET_CAPS = True
+RUN_EXPAND_DB = False
+RUN_FILL_MARKET_CAPS = False
 UPDATE_DAYS = 5
 EXPAND_MAX_NEW = 1000
 EXPAND_START = "2024-01-01"

@@ -29,7 +29,7 @@ python generate_signals_with_research.py
    - ⚖️ **Verdict**: Adjusts scanner score (soft penalty/bonus, ~-25 to +30) based on findings
 
 **Trading mode**: Manual / paper trading (no broker API connected yet).
-**Universe**: Built daily by liquidity (top N by notional / volume floor), Nikkei 225 excluded. Defaults: `UNIVERSE_TOP_N=500`, `MIN_AVG_DAILY_VOLUME=20_000`. Market-cap filter is enforced and `symbol_info.market_cap` is auto‑populated incrementally.
+**Universe**: Built daily by liquidity (top N by notional / volume floor), Nikkei 225 excluded. Defaults: `UNIVERSE_TOP_N=1500`, `MIN_AVG_DAILY_VOLUME=20_000`. Market-cap filter is enforced and `symbol_info.market_cap` is auto‑populated incrementally.
 **Source of truth**: `config.py` (legacy YAML config removed).
 **Early Mode (default)**: Pre‑burst focus with filters (10‑day return < 15%, RSI ≤ 65) and early‑scanner subset.
 
@@ -66,7 +66,8 @@ JP_stocks_modular/
 
 ## Daily Workflow
 
-1. **Update DB**: `python -c "import data_manager as dm; dm.update_recent_data(days=5)"`
+1. **Update DB**: `python -c "import data_manager as dm; dm.update_recent_data(days=5)"`  
+   - Skips symbols already up-to-date and avoids pre‑close (before 16:00 JST) requests.
 2. **Rebuild Cache**: `python precompute.py` (auto-expands DB + updates market caps each run)
 3. **Run Generator**: `python generate_signals_with_research.py` (auto-saves LLM results to `results/llm_research_*.json` and `.csv`)
 4. **Plot Charts (optional)**: `python plot_signals_charts.py --top 20 --days 180`
@@ -76,6 +77,7 @@ JP_stocks_modular/
 7. **Run All (no LLM by default)**: `python run_all.py`  
    - Includes optional DB expand + market-cap fill (can disable): `python run_all.py --no-expand-db --no-fill-market-caps`  
    - Add LLM: `python run_all.py --with-llm`
+   - Default toggles are editable at top of `run_all.py`
 8. **Review Output**:
    - Check **Adjusted Score** (Scanner + AI Bonus)
    - Read **News Summary** & **Risks**
@@ -108,6 +110,7 @@ JP_stocks_modular/
 - JPX short-interest is live-only context for LLM research (not used in backtests/scanner scoring; missing data is neutral).
 - Fast cache must be rebuilt after changing universe or scanner settings.
 - DB coverage matters: a symbol not present in `jp_stocks.db` can never be signaled. Use `python expand_db.py --max-new 1000` to grow coverage incrementally.
+- Delisted tickers are cached in `cache/bad_yfinance_tickers.txt` and skipped on future runs.
 
 ## License
 

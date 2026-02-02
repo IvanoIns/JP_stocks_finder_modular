@@ -58,7 +58,8 @@
 8. [ ] **Monitor**: Check if AI sentiment correlates with actual price moves
 9. [ ] **Refine**: Adjust AI score weights if needed (keep sentiment as penalty, not veto)
 10. [ ] **Expand DB coverage**: Use `python expand_db.py --max-new 1000 --start 2024-01-01` (repeat) so microcaps can be scanned.
+11. [ ] **YFinance field mapping**: Sample 3 tickers per market-cap decile and label available `fast_info`/`info` fields for analysis (use `fill_market_caps.py` then `yfinance_field_mapper.py`).
 
 ---
 
-*Last updated: 2026-01-31*
+*Last updated: 2026-02-02*

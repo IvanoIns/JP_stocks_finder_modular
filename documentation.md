@@ -6,7 +6,7 @@ Japanese liquidity-selected stock scanner targeting "burst" candidates (10-30% m
 
 **Proven Performance**: PF 2.46, 59% Win Rate (Score 30, R:R 2.0)
 
-**Source of truth**: `config.py` (legacy YAML config removed).
+**Source of truth**: `config.py` (legacy YAML config removed).  
 **Execution mode**: Manual / paper trading (no broker API connected yet).
 
 ---
@@ -44,12 +44,13 @@ EXIT_MODE = 'fixed_rr'      # Exit at target or stop
 
 ## Universe Selection (Aligned)
 
-Universe is built daily using `data_manager.build_liquid_universe`:
-top `UNIVERSE_TOP_N` by notional (with `MIN_AVG_DAILY_VOLUME`), excluding Nikkei 225 if enabled. Defaults: `UNIVERSE_TOP_N=500`, `MIN_AVG_DAILY_VOLUME=20_000`.
-This is shared by **backtests** and **precompute cache** for consistency.
-If you change universe settings in `config.py`, rebuild the cache.
-Cache now stores all triggered signals (score > 0) and filters by `MIN_SCANNER_SCORE` at runtime.
-Market‑cap filtering is enforced; `symbol_info.market_cap` is auto‑populated incrementally.
+Universe is built daily using `data_manager.build_liquid_universe`:  
+top `UNIVERSE_TOP_N` by notional (with `MIN_AVG_DAILY_VOLUME`), excluding Nikkei 225 if enabled. Defaults: `UNIVERSE_TOP_N=1500`, `MIN_AVG_DAILY_VOLUME=20_000`.
+
+This is shared by **backtests** and **precompute cache** for consistency.  
+If you change universe settings in `config.py`, rebuild the cache.  
+Cache now stores all triggered signals (score > 0) and filters by `MIN_SCANNER_SCORE` at runtime.  
+Market-cap filtering is enforced; `symbol_info.market_cap` is auto‑populated incrementally.
 
 ---
 
@@ -57,6 +58,7 @@ Market‑cap filtering is enforced; `symbol_info.market_cap` is auto‑populated
 
 - JPX short-interest is live-only context for LLM research (not used in backtests/scanner scoring; missing data is neutral).
 - Fast cache must be rebuilt after changing universe or scanner settings.
+- Delisted tickers are cached in `cache/bad_yfinance_tickers.txt` and skipped on future runs.
 
 ---
 
@@ -65,16 +67,18 @@ Market‑cap filtering is enforced; `symbol_info.market_cap` is auto‑populated
 Signal generation is cache-based for speed.
 
 1. Update DB: `python -c "import data_manager as dm; dm.update_recent_data(days=5)"`
+   - Skips symbols already up-to-date and avoids pre‑close (before 16:00 JST) requests.
 2. Rebuild cache: `python precompute.py` (auto-expands DB + updates market caps each run)
 3. Generate signals: `python generate_signals.py` (scanner only) or `python generate_signals_with_research.py` (scanner + LLM, auto-saves to `results/llm_research_*.json` and `.csv`)
 4. Plot charts (optional): `python plot_signals_charts.py --top 20 --days 180`
 5. Terminal dashboard (optional): `python signals_dashboard.py --top 20 --days 180`
 6. Streamlit dashboard (recommended): `streamlit run streamlit_dashboard.py`  
    - If empty, select a **date with signals** (checkbox on by default) or lower **Min Score**.
+7. Run All: `python run_all.py` (defaults editable in file)
 
-Stops/targets are % based (6% stop, 2R target) and should be computed from your actual entry fill at the open.
-Output is split into lot-affordable vs over-budget picks using `MAX_JPY_PER_TRADE` and `LOT_SIZE` from `config.py`.
-Early Mode is default: 10‑day return < 15%, RSI ≤ 65, and early‑scanner subset. Toggle legacy output via `EARLY_MODE_SHOW_BOTH`.
+Stops/targets are % based (6% stop, 2R target) and should be computed from your actual entry fill at the open.  
+Output is split into lot-affordable vs over-budget picks using `MAX_JPY_PER_TRADE` and `LOT_SIZE` from `config.py`.  
+Early Mode is default: 10‑day return < 15%, RSI ≤ 65, and early‑scanner subset. Toggle legacy output via `EARLY_MODE_SHOW_BOTH`.  
 Signal entry prices use the **next trading day open** when available; if not, they fall back to the last close and are marked with `*`.
 
 ---
@@ -89,6 +93,8 @@ Use incremental downloads (resumable):
 
 Auto-expand is enabled by default in `config.py` and runs inside `precompute.py`.
 
+---
+
 ## Script Reference
 
 | Script | Purpose | Usage |
@@ -96,6 +102,7 @@ Auto-expand is enabled by default in `config.py` and runs inside `precompute.py`
 | `generate_signals_with_research.py` | **Main Tool**: Scans + AI Research | Daily |
 | `llm_research.py` | AI Module (Perplexity API) | Import only |
 | `generate_signals.py` | Legacy: Scans only (faster) | Quick check |
+| `run_all.py` | Full pipeline (expand + caps + cache + signals) | Daily |
 | `run_walk_forward.py` | Optimization | Research |
 
 ---
@@ -132,4 +139,4 @@ bonus = (num_scanners - 1) * 10
 
 ---
 
-*Last updated: 2026-01-31*
+*Last updated: 2026-02-02*
