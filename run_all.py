@@ -1,10 +1,11 @@
 """
 Run the full daily pipeline (including optional DB expansion and market-cap fill).
 
+Edit the DEFAULT_* settings below to change behavior without CLI flags.
+
 Usage:
   python run_all.py
   python run_all.py --with-llm
-  python run_all.py --no-expand-db --no-fill-market-caps
   python run_all.py --update-days 5 --precompute-args "--top 1500"
 """
 
@@ -21,22 +22,35 @@ def _run(cmd: list[str]) -> int:
     return subprocess.call(cmd)
 
 
+# =========================
+# Editable defaults (toggles)
+# =========================
+RUN_EXPAND_DB = True
+RUN_FILL_MARKET_CAPS = True
+UPDATE_DAYS = 5
+EXPAND_MAX_NEW = 1000
+EXPAND_START = "2024-01-01"
+MC_BATCH = 300
+MC_SLEEP = 0.2
+MC_MAX_BATCHES = 5
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--update-days", type=int, default=5, help="Days to refresh in DB")
+    parser.add_argument("--update-days", type=int, default=UPDATE_DAYS, help="Days to refresh in DB")
     parser.add_argument("--with-llm", action="store_true", help="Run LLM research script at the end")
     parser.add_argument("--precompute-args", type=str, default="", help="Extra args for precompute.py")
     parser.add_argument("--signals-args", type=str, default="", help="Extra args for generate_signals.py")
     parser.add_argument("--llm-args", type=str, default="", help="Extra args for generate_signals_with_research.py")
-    parser.add_argument("--expand-db", action="store_true", default=True, help="Run expand_db.py")
+    parser.add_argument("--expand-db", action="store_true", default=RUN_EXPAND_DB, help="Run expand_db.py")
     parser.add_argument("--no-expand-db", action="store_false", dest="expand_db")
-    parser.add_argument("--fill-market-caps", action="store_true", default=True, help="Run fill_market_caps.py")
+    parser.add_argument("--fill-market-caps", action="store_true", default=RUN_FILL_MARKET_CAPS, help="Run fill_market_caps.py")
     parser.add_argument("--no-fill-market-caps", action="store_false", dest="fill_market_caps")
-    parser.add_argument("--expand-max-new", type=int, default=1000, help="Max new symbols for expand_db.py")
-    parser.add_argument("--expand-start", type=str, default="2024-01-01", help="Start date for expand_db.py")
-    parser.add_argument("--mc-batch", type=int, default=300, help="Batch size for fill_market_caps.py")
-    parser.add_argument("--mc-sleep", type=float, default=0.2, help="Sleep seconds for fill_market_caps.py")
-    parser.add_argument("--mc-max-batches", type=int, default=5, help="Max batches for fill_market_caps.py")
+    parser.add_argument("--expand-max-new", type=int, default=EXPAND_MAX_NEW, help="Max new symbols for expand_db.py")
+    parser.add_argument("--expand-start", type=str, default=EXPAND_START, help="Start date for expand_db.py")
+    parser.add_argument("--mc-batch", type=int, default=MC_BATCH, help="Batch size for fill_market_caps.py")
+    parser.add_argument("--mc-sleep", type=float, default=MC_SLEEP, help="Sleep seconds for fill_market_caps.py")
+    parser.add_argument("--mc-max-batches", type=int, default=MC_MAX_BATCHES, help="Max batches for fill_market_caps.py")
     args = parser.parse_args()
 
     # 0) Optional: expand DB coverage
