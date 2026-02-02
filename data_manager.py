@@ -6,6 +6,7 @@ JPX short-selling data scraper, and universe building functions.
 """
 
 import sqlite3
+from zoneinfo import ZoneInfo
 import pandas as pd
 import numpy as np
 import yfinance as yf
@@ -293,8 +294,27 @@ def download_price_history(
     
     if end_date is None:
         end_date = datetime.now().strftime('%Y-%m-%d')
+
+    # Avoid requesting today's data before JP market close
+    try:
+        jst = datetime.now(ZoneInfo("Asia/Tokyo"))
+        if end_date == jst.strftime("%Y-%m-%d") and jst.hour < 16:
+            end_date = (jst - timedelta(days=1)).strftime("%Y-%m-%d")
+    except Exception:
+        pass
     
     successful = 0
+    # Load bad tickers cache (to avoid repeated delisted requests)
+    bad_file = config.CACHE_DIR / "bad_yfinance_tickers.txt"
+    bad_tickers = set()
+    if bad_file.exists():
+        try:
+            bad_tickers = set(pd.read_csv(bad_file, header=None)[0].astype(str).tolist())
+        except Exception:
+            bad_tickers = set()
+
+    symbols = [s for s in symbols if s not in bad_tickers]
+
     iterator = tqdm(symbols, desc="Downloading price history") if progress else symbols
     
     for i, symbol in enumerate(iterator):
@@ -339,6 +359,13 @@ def download_price_history(
                 time.sleep(sleep_seconds)
                  
         except Exception as e:
+            msg = str(e).lower()
+            if "possibly delisted" in msg or "no data found" in msg or "no timezone found" in msg:
+                try:
+                    with open(bad_file, "a", encoding="utf-8") as f:
+                        f.write(f"{symbol}\n")
+                except Exception:
+                    pass
             logger.debug(f"Error downloading {symbol}: {e}")
             continue
     
