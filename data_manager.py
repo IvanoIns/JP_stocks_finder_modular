@@ -388,20 +388,53 @@ def update_recent_data(symbols: list[str] = None, days: int = 5) -> int:
     """
     conn = get_connection()
     cursor = conn.cursor()
-    
+
     if symbols is None:
         cursor.execute("SELECT DISTINCT symbol FROM daily_prices")
         symbols = [row[0] for row in cursor.fetchall()]
-    
+
     if not symbols:
         logger.warning("No symbols to update")
         return 0
-    
+
+    # Determine end_date (respect JP market close)
     end_date = datetime.now().strftime('%Y-%m-%d')
-    start_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
-    
+    try:
+        jst = datetime.now(ZoneInfo("Asia/Tokyo"))
+        if end_date == jst.strftime("%Y-%m-%d") and jst.hour < 16:
+            end_date = (jst - timedelta(days=1)).strftime('%Y-%m-%d')
+    except Exception:
+        pass
+
+    # Map last available date per symbol
+    placeholders = ",".join(["?"] * len(symbols))
+    cursor.execute(
+        f"SELECT symbol, MAX(date) FROM daily_prices WHERE symbol IN ({placeholders}) GROUP BY symbol",
+        symbols,
+    )
+    last_dates = {row[0]: row[1] for row in cursor.fetchall()}
     conn.close()
-    return download_price_history(symbols, start_date=start_date, end_date=end_date, progress=True)
+
+    updated = 0
+    for sym in symbols:
+        last_date = last_dates.get(sym)
+        if last_date and last_date >= end_date:
+            continue
+
+        # Pull only missing range
+        if last_date:
+            start_date = (datetime.strptime(last_date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+        else:
+            start_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+
+        # Do not request future range
+        if start_date > end_date:
+            continue
+
+        updated += download_price_history([sym], start_date=start_date, end_date=end_date, progress=False)
+
+    logger.info(f"Updated recent data for {updated} symbols")
+    return updated
 
 
 def get_daily_bars(
