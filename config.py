@@ -79,7 +79,7 @@ MARKET_CAP_MISSING_POLICY = "include"
 MIN_AVG_DAILY_VOLUME = 20_000
 LIQUIDITY_FLOOR_JPY = 100_000_000
 # Expanded universe to reduce large-cap bias from "top notional" ranking.
-UNIVERSE_TOP_N = 500
+UNIVERSE_TOP_N = 1500
 EXCLUDE_NIKKEI_225 = True
 
 # Performance pre-filters (from JP prototype)
