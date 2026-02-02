@@ -73,7 +73,9 @@ JP_stocks_modular/
 5. **Terminal Dashboard (optional)**: `python signals_dashboard.py --top 20 --days 180`
 6. **Streamlit Dashboard (recommended)**: `streamlit run streamlit_dashboard.py`  
    - If the dashboard is empty, pick a **date with signals** (checkbox is on by default) or lower **Min Score**.
-7. **Review Output**:
+7. **Run All (no LLM by default)**: `python run_all.py`  
+   - Add LLM: `python run_all.py --with-llm`
+8. **Review Output**:
    - Check **Adjusted Score** (Scanner + AI Bonus)
    - Read **News Summary** & **Risks**
    - Verify **Confluence** count
