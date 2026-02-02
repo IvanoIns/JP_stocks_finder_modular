@@ -74,6 +74,7 @@ JP_stocks_modular/
 6. **Streamlit Dashboard (recommended)**: `streamlit run streamlit_dashboard.py`  
    - If the dashboard is empty, pick a **date with signals** (checkbox is on by default) or lower **Min Score**.
 7. **Run All (no LLM by default)**: `python run_all.py`  
+   - Includes optional DB expand + market-cap fill (can disable): `python run_all.py --no-expand-db --no-fill-market-caps`  
    - Add LLM: `python run_all.py --with-llm`
 8. **Review Output**:
    - Check **Adjusted Score** (Scanner + AI Bonus)

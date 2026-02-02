@@ -1,9 +1,10 @@
 """
-Run the full daily pipeline (excluding LLM research unless opted-in).
+Run the full daily pipeline (including optional DB expansion and market-cap fill).
 
 Usage:
   python run_all.py
   python run_all.py --with-llm
+  python run_all.py --no-expand-db --no-fill-market-caps
   python run_all.py --update-days 5 --precompute-args "--top 1500"
 """
 
@@ -27,7 +28,44 @@ def main() -> int:
     parser.add_argument("--precompute-args", type=str, default="", help="Extra args for precompute.py")
     parser.add_argument("--signals-args", type=str, default="", help="Extra args for generate_signals.py")
     parser.add_argument("--llm-args", type=str, default="", help="Extra args for generate_signals_with_research.py")
+    parser.add_argument("--expand-db", action="store_true", default=True, help="Run expand_db.py")
+    parser.add_argument("--no-expand-db", action="store_false", dest="expand_db")
+    parser.add_argument("--fill-market-caps", action="store_true", default=True, help="Run fill_market_caps.py")
+    parser.add_argument("--no-fill-market-caps", action="store_false", dest="fill_market_caps")
+    parser.add_argument("--expand-max-new", type=int, default=1000, help="Max new symbols for expand_db.py")
+    parser.add_argument("--expand-start", type=str, default="2024-01-01", help="Start date for expand_db.py")
+    parser.add_argument("--mc-batch", type=int, default=300, help="Batch size for fill_market_caps.py")
+    parser.add_argument("--mc-sleep", type=float, default=0.2, help="Sleep seconds for fill_market_caps.py")
+    parser.add_argument("--mc-max-batches", type=int, default=5, help="Max batches for fill_market_caps.py")
     args = parser.parse_args()
+
+    # 0) Optional: expand DB coverage
+    if args.expand_db:
+        rc = _run([
+            sys.executable,
+            "expand_db.py",
+            "--max-new",
+            str(args.expand_max_new),
+            "--start",
+            args.expand_start,
+        ])
+        if rc != 0:
+            return rc
+
+    # 0b) Optional: fill market caps
+    if args.fill_market_caps:
+        rc = _run([
+            sys.executable,
+            "fill_market_caps.py",
+            "--batch",
+            str(args.mc_batch),
+            "--sleep",
+            str(args.mc_sleep),
+            "--max-batches",
+            str(args.mc_max_batches),
+        ])
+        if rc != 0:
+            return rc
 
     # 1) Update DB (recent data)
     rc = _run([sys.executable, "-c", f"import data_manager as dm; dm.update_recent_data(days={args.update_days})"])
