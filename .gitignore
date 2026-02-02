@@ -9,6 +9,10 @@ __pycache__/
 
 # Database & Cache
 jp_stocks.db
+jp_stocks.db-wal
+jp_stocks.db-shm
+*.db-wal
+*.db-shm
 cache/
 results/
 results/precomputed_cache.pkl

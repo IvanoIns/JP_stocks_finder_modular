@@ -103,6 +103,7 @@ Auto-expand is enabled by default in `config.py` and runs inside `precompute.py`
 | `llm_research.py` | AI Module (Perplexity API) | Import only |
 | `generate_signals.py` | Legacy: Scans only (faster) | Quick check |
 | `run_all.py` | Full pipeline (expand + caps + cache + signals) | Daily |
+| `diagnose_missed_signals.py` | Diagnose excluded legacy signals for a date (Early Mode vs legacy) | Debug |
 | `run_walk_forward.py` | Optimization | Research |
 
 ---
