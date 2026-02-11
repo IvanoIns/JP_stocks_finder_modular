@@ -7,6 +7,7 @@ Run:
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -22,6 +23,10 @@ except Exception:
 import config
 import data_manager as dm
 from precompute import load_precomputed
+
+
+AB_SCORECARD_SUMMARY_PATH = Path("results/burst_audit/ab_scorecard_latest.json")
+AB_SCORECARD_DAILY_PATH = Path("results/burst_audit/ab_scorecard_daily.csv")
 
 
 def _get_latest_date_with_signals(precomputed) -> str | None:
@@ -41,6 +46,31 @@ def _load_cache():
     if not cache_path.exists():
         return None
     return load_precomputed(cache_path)
+
+
+@st.cache_data(show_spinner=False)
+def _load_ab_scorecard_summary() -> dict | None:
+    if not AB_SCORECARD_SUMMARY_PATH.exists():
+        return None
+    try:
+        with open(AB_SCORECARD_SUMMARY_PATH, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        return payload if isinstance(payload, dict) else None
+    except Exception:
+        return None
+
+
+@st.cache_data(show_spinner=False)
+def _load_ab_scorecard_daily() -> pd.DataFrame:
+    if not AB_SCORECARD_DAILY_PATH.exists():
+        return pd.DataFrame()
+    try:
+        df = pd.read_csv(AB_SCORECARD_DAILY_PATH)
+        if "burst_date" in df.columns:
+            df["burst_date"] = pd.to_datetime(df["burst_date"], errors="coerce")
+        return df
+    except Exception:
+        return pd.DataFrame()
 
 
 def _get_signals(precomputed, date: str, min_score: int):
@@ -82,6 +112,114 @@ def _plot_candles(df: pd.DataFrame, title: str):
     st.plotly_chart(fig, width="stretch")
 
 
+def _fmt_pct(value) -> str:
+    if value is None:
+        return "n/a"
+    if isinstance(value, float) and pd.isna(value):
+        return "n/a"
+    if value == float("inf"):
+        return "inf"
+    try:
+        return f"{float(value) * 100:.2f}%"
+    except Exception:
+        return "n/a"
+
+
+def _fmt_rel_delta(value) -> str:
+    if value is None:
+        return "n/a"
+    if value == float("inf"):
+        return "inf"
+    try:
+        sign = "+" if float(value) >= 0 else ""
+        return f"{sign}{float(value) * 100:.2f}%"
+    except Exception:
+        return "n/a"
+
+
+def _render_ab_summary_panel():
+    st.subheader("A/B Summary")
+
+    summary = _load_ab_scorecard_summary()
+    daily = _load_ab_scorecard_daily()
+
+    if summary is None:
+        st.info(
+            "A/B scorecard not found. Run: "
+            "`python ab_scorecard.py --ab-master results/burst_audit/ab_audit_master.csv --top-n 10 --window-days 20 --min-days 20`"
+        )
+        return
+
+    decision = summary.get("decision", {})
+    window = summary.get("window", {})
+    aggregates = summary.get("aggregates", {})
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Decision", str(decision.get("verdict", "n/a")))
+    c2.metric("Observed Days", str(window.get("observed_days", "n/a")))
+    c3.metric("Total Bursts", str(aggregates.get("total_bursts", "n/a")))
+    c4.metric("Capture A/B", f"{aggregates.get('captures_a_topn', 'n/a')} / {aggregates.get('captures_b_topn', 'n/a')}")
+
+    c5, c6, c7, c8 = st.columns(4)
+    c5.metric("Capture Rate A", _fmt_pct(aggregates.get("capture_rate_a_topn")))
+    c6.metric(
+        "Capture Rate B",
+        _fmt_pct(aggregates.get("capture_rate_b_topn")),
+        delta=_fmt_rel_delta(aggregates.get("rel_capture_change_b_vs_a")),
+    )
+    c7.metric("Precision A", _fmt_pct(aggregates.get("precision_a_topn")))
+    c8.metric(
+        "Precision B",
+        _fmt_pct(aggregates.get("precision_b_topn")),
+        delta=_fmt_rel_delta(aggregates.get("rel_precision_change_b_vs_a")),
+    )
+
+    if daily.empty:
+        st.info("No daily A/B scorecard rows yet.")
+        return
+
+    daily = daily.sort_values("burst_date").copy()
+    trend = go.Figure()
+    trend.add_trace(
+        go.Scatter(
+            x=daily["burst_date"],
+            y=daily["capture_rate_a_topn"],
+            mode="lines+markers",
+            name="Capture Rate A",
+        )
+    )
+    trend.add_trace(
+        go.Scatter(
+            x=daily["burst_date"],
+            y=daily["capture_rate_b_topn"],
+            mode="lines+markers",
+            name="Capture Rate B",
+        )
+    )
+    trend.update_layout(
+        title="A/B Capture Rate Trend",
+        xaxis_title="Burst Date",
+        yaxis_title="Capture Rate",
+        height=360,
+    )
+    st.plotly_chart(trend, width="stretch")
+
+    table_cols = [
+        "burst_date",
+        "total_bursts",
+        "captured_a_topn",
+        "captured_b_topn",
+        "capture_rate_a_topn",
+        "capture_rate_b_topn",
+        "precision_a_topn",
+        "precision_b_topn",
+        "new_hits_b_not_a",
+        "lost_hits_a_not_b",
+    ]
+    show_cols = [c for c in table_cols if c in daily.columns]
+    st.dataframe(daily[show_cols].tail(20), width="stretch")
+
+
 def main():
     if get_script_run_ctx and get_script_run_ctx() is None:
         print("Please run this dashboard with:")
@@ -115,6 +253,8 @@ def main():
         if dates_with_signals:
             st.info(f"Latest date with signals: {dates_with_signals[-1]}")
         st.info("Try lowering the min score, or select a different date.")
+        st.divider()
+        _render_ab_summary_panel()
         return
 
     symbols = [s["symbol"] for s in signals]
@@ -128,17 +268,23 @@ def main():
     st.subheader(f"{selected} | Score {selected_signal.get('score', 0):.0f} | {selected_signal.get('strategy', '')}")
     if df is None or df.empty:
         st.info("No data found for selected symbol.")
+        st.divider()
+        _render_ab_summary_panel()
         return
 
-    _plot_candles(df, f"{selected} ({start_date} → {end_date})")
+    _plot_candles(df, f"{selected} ({start_date} -> {end_date})")
 
     with st.expander("Signal Details"):
         st.json(selected_signal)
 
     st.subheader("All Signals")
     st.dataframe(
-        pd.DataFrame(signals)[["symbol", "strategy", "score", "price", "confluence_count"]]
+        pd.DataFrame(signals)[["symbol", "strategy", "score", "price", "confluence_count"]],
+        width="stretch",
     )
+
+    st.divider()
+    _render_ab_summary_panel()
 
 
 if __name__ == "__main__":

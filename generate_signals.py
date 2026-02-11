@@ -5,6 +5,11 @@ Scans the most recent data and outputs trade signals with entry/stop/target pric
 Use config.py parameters (Score 30, Stop 6%, R:R 2.0).
 """
 
+from __future__ import annotations
+
+import csv
+import json
+from datetime import datetime
 from pathlib import Path
 import sqlite3
 import config
@@ -176,6 +181,93 @@ def _attach_entry_prices(precomputed, date: str, signals: list[dict]) -> bool:
         sig["entry_price"] = entry_price
         sig["entry_source"] = entry_source
     return estimated
+
+
+def _save_daily_picks(
+    precomputed,
+    signal_date: str,
+    signals: list[dict],
+    *,
+    min_score: int,
+    stop_loss_pct: float,
+    rr_ratio: float,
+    max_jpy: float,
+    lot_size: int,
+) -> tuple[Path, Path]:
+    picks_dir = Path(getattr(config, "RESULTS_DIR", Path("results"))) / "daily_picks"
+    picks_dir.mkdir(parents=True, exist_ok=True)
+
+    entry_date = _get_next_trading_date(precomputed, signal_date)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    rows: list[dict] = []
+    for s in signals:
+        symbol = s.get("symbol")
+        if not symbol:
+            continue
+
+        entry = float(s.get("entry_price") or s.get("price") or 0)
+        lot_cost = _lot_cost(entry, lot_size)
+        budget_ok = entry > 0 and lot_cost <= max_jpy
+
+        rows.append(
+            {
+                "run_timestamp": ts,
+                "signal_date": signal_date,
+                "entry_date": entry_date,
+                "symbol": symbol,
+                "strategy": s.get("strategy"),
+                "score": s.get("score"),
+                "close_price": s.get("price"),
+                "entry_price": entry,
+                "entry_source": s.get("entry_source", "close_est"),
+                "stop_price": entry * (1 - stop_loss_pct) if entry else None,
+                "target_price": entry * (1 + stop_loss_pct * rr_ratio) if entry else None,
+                "lot_size": lot_size,
+                "max_jpy_per_trade": max_jpy,
+                "lot_cost": lot_cost,
+                "budget_ok": budget_ok,
+                "max_shares_within_budget": _max_shares(entry, max_jpy),
+                "confluence_count": s.get("confluence_count", 1),
+                "confluence_scanners": "|".join(s.get("confluence_scanners", []) or []),
+                "bucket": "lot_affordable" if budget_ok else "odd_lot",
+            }
+        )
+
+    csv_path = picks_dir / f"daily_picks_{signal_date}.csv"
+    json_path = picks_dir / f"daily_picks_{signal_date}.json"
+
+    # CSV
+    if rows:
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(rows)
+
+    # JSON (includes config snapshot)
+    payload = {
+        "run_timestamp": ts,
+        "signal_date": signal_date,
+        "entry_date": entry_date,
+        "min_score": min_score,
+        "stop_loss_pct": stop_loss_pct,
+        "risk_reward_ratio": rr_ratio,
+        "early_mode_enabled": config.EARLY_MODE_ENABLED,
+        "early_mode_rsi_max": getattr(config, "EARLY_MODE_RSI_MAX", None),
+        "early_mode_10d_return_max": getattr(config, "EARLY_MODE_10D_RETURN_MAX", None),
+        "early_mode_scanners": getattr(config, "EARLY_MODE_SCANNERS", []),
+        "universe_top_n": config.UNIVERSE_TOP_N,
+        "min_avg_daily_volume": config.MIN_AVG_DAILY_VOLUME,
+        "max_market_cap_jpy": getattr(config, "MAX_MARKET_CAP_JPY", None),
+        "enforce_market_cap": getattr(config, "ENFORCE_MARKET_CAP", False),
+        "market_cap_missing_policy": getattr(config, "MARKET_CAP_MISSING_POLICY", None),
+        "budget": {"max_jpy_per_trade": max_jpy, "lot_size": lot_size},
+        "picks": rows,
+    }
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+    return csv_path, json_path
 
 
 def _compute_signals_for_date(precomputed, date: str, min_score: int, scanner_config: dict, early_mode: bool) -> list[dict]:
@@ -427,6 +519,20 @@ def generate_signals():
     print("- Exit: First to hit (stop OR target)")
     print("\nTIP: High confluence (3+) = multiple scanners agree = stronger signal")
     print("=" * 70)
+
+    if getattr(config, "SAVE_DAILY_PICKS", True):
+        csv_path, json_path = _save_daily_picks(
+            precomputed=precomputed,
+            signal_date=latest_date,
+            signals=filtered,
+            min_score=min_score,
+            stop_loss_pct=stop_loss_pct,
+            rr_ratio=rr_ratio,
+            max_jpy=max_jpy,
+            lot_size=lot_size,
+        )
+        print(f"\nSaved daily picks to: {csv_path}")
+        print(f"Saved daily picks to: {json_path}")
 
 
 if __name__ == "__main__":

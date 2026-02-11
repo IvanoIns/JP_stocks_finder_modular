@@ -1,143 +1,245 @@
-# JP Stocks Modular — Documentation
+# JP Stocks Modular - Documentation
 
-## System Overview
+## Overview
 
-Japanese liquidity-selected stock scanner targeting "burst" candidates (10-30% moves). Combines **Quantitative Scanners** with **Qualitative AI Research**.
+Japanese stock scanner targeting **pre-burst** setups (manual / paper trading). It combines:
+- **Quant scanners** (technical signals + confluence scoring)
+- Optional **LLM research** (news/catalysts/risks sentiment as a *soft* score adjustment)
 
-**Proven Performance**: PF 2.46, 59% Win Rate (Score 30, R:R 2.0)
-
-**Source of truth**: `config.py` (legacy YAML config removed).  
-**Execution mode**: Manual / paper trading (no broker API connected yet).
-
----
-
-## 🧠 AI Research Module (New)
-
-Located in `llm_research.py`, this module adds a "human-like" analyst review to the automated signals.
-
-### Features
-- **Engine**: Perplexity Sonar Pro (Grounded Search)
-- **Scope**: Last 30 days of news + Social Media (X/Twitter)
-- **Language**: English & Japanese (`{Asset} ニュース`)
-- **Output**: JSON structured data (Catalysts, Risks, Sentiment)
-
-### Scoring Adjustment
-The AI modifies the raw Scanner Score to create a final **Adjusted Score**:
-- **Sentiment**: +10 (Positive) to -10 (Negative)
-- **Catalysts**: +5 per valid catalyst (Max +20)
-- **Risks**: -3 per key risk (Max -15)
-
-Negative sentiment is a **soft penalty**, not a veto (a very strong technical score can still rank highly).
+**Source of truth:** `config.py` (ignore `settings.yaml` if present).
 
 ---
 
-## Current Parameters
+## Daily Pipeline (Cache-Based)
 
-```python
-MIN_SCANNER_SCORE = 30      # Filter threshold
-STOP_LOSS_PCT = 0.06        # 6% stop
-RISK_REWARD_RATIO = 2.0     # 12% target
-EXIT_MODE = 'fixed_rr'      # Exit at target or stop
-```
+The system is designed so `generate_signals.py` is fast (seconds) by using a precomputed cache.
 
----
+1) **Update DB (incremental):**
+   - `python -c "import data_manager as dm; dm.update_recent_data(days=5)"`
+   - Updates only "active" symbols (volume >= `MIN_AVG_DAILY_VOLUME` on the latest DB date).
+   - Uses batched multi-ticker downloads for short ranges (faster, fewer rate limits).
+   - Avoids wasting time on a date Yahoo hasn't published yet:
+     - `YFINANCE_DAILY_READY_HOUR` (JST) controls when "today" is allowed.
+     - `YFINANCE_USE_LATEST_DATE_GUARD=True` clamps requests to Yahoo's latest available daily bar.
+   - Bad/invalid tickers may be listed in `cache/bad_yfinance_tickers.txt`.
+     - Default policy: only skip symbols that have **no rows in the DB** (`YFINANCE_BAD_TICKERS_POLICY="skip_if_no_db_data"`).
+     - If the file gets polluted, prune it with: `python clean_bad_yfinance_tickers.py`
 
-## Universe Selection (Aligned)
+2) **Update cache (fast scanning, incremental):**
+    - `python precompute.py`
+    - Produces/updates `results/precomputed_cache.pkl`
+    - Default behavior:
+      - computes only missing trading dates
+      - refreshes indicator data for the current universe symbols
+      - prunes old dates outside the requested window
+    - Rebuild triggers:
+      - fingerprint mismatch on code/config/runtime knobs
+      - explicit `python precompute.py --rebuild`
+    - Fingerprint covers hashes of:
+      - `scanners.py`
+      - `technical_analysis.py`
+      - `data_manager.py`
+      - `config.py`
+      - `precompute.py`
+    - Also optionally:
+      - expands DB coverage (`AUTO_EXPAND_DB`)
+      - fills missing market caps incrementally (`AUTO_UPDATE_MARKET_CAP`)
 
-Universe is built daily using `data_manager.build_liquid_universe`:  
-top `UNIVERSE_TOP_N` by notional (with `MIN_AVG_DAILY_VOLUME`), excluding Nikkei 225 if enabled. Defaults: `UNIVERSE_TOP_N=1500`, `MIN_AVG_DAILY_VOLUME=20_000`.
+3) **Generate signals (scanner-only):**
+   - `python generate_signals.py`
+   - Saves picks to:
+     - `results/daily_picks/daily_picks_YYYY-MM-DD.csv`
+     - `results/daily_picks/daily_picks_YYYY-MM-DD.json`
 
-This is shared by **backtests** and **precompute cache** for consistency.  
-If you change universe settings in `config.py`, rebuild the cache.  
-Cache now stores all triggered signals (score > 0) and filters by `MIN_SCANNER_SCORE` at runtime.  
-Market-cap filtering is enforced; `symbol_info.market_cap` is auto‑populated incrementally.
+4) **Burst audit (real market recall vs picks):**
+   - `python burst_audit.py daily --pending --start 2026-01-31`
+   - Auto-collects DB bursts (`close(D) >= close(prev_day) * 1.10`) into:
+     - `results/burst_audit/bursts_log.csv`
+   - Audits each burst date against previous-day candidates and saves:
+     - `results/burst_audit/audit_YYYY-MM-DD.csv`
+     - `results/burst_audit/audit_summary_YYYY-MM-DD.json`
+     - `results/burst_audit/audit_master.csv`
+   - If A/B is enabled, it also compares baseline vs shadow universe (top-N):
+     - Shadow picks: `results/daily_picks_ab/daily_picks_shadow_YYYY-MM-DD.csv|json`
+     - A/B daily audit: `results/burst_audit/ab_audit_YYYY-MM-DD.csv`
+     - A/B daily summary: `results/burst_audit/ab_audit_summary_YYYY-MM-DD.json`
+     - A/B master: `results/burst_audit/ab_audit_master.csv`
+   - If you miss days, `--pending` catches up all missing dates.
+   - You can manually append missing external bursts to `bursts_log.csv`; audit re-runs only when payload changes.
 
----
+5) **Generate signals + LLM research (optional):**
+   - `python generate_signals_with_research.py --top 20`
+   - Saves:
+     - `results/llm_research_YYYYMMDD_HHMMSS.json`
+     - `results/llm_research_YYYYMMDD_HHMMSS.csv`
 
-## Known Issues / Risks
+6) **Dashboards (optional):**
+   - Streamlit (recommended): `streamlit run streamlit_dashboard.py`
+   - Charts (PNG): `python plot_signals_charts.py --top 20 --days 180`
 
-- JPX short-interest is live-only context for LLM research (not used in backtests/scanner scoring; missing data is neutral).
-- Fast cache must be rebuilt after changing universe or scanner settings.
-- Delisted tickers are cached in `cache/bad_yfinance_tickers.txt` and skipped on future runs.
-
----
-
-## Cache Workflow (Daily)
-
-Signal generation is cache-based for speed.
-
-1. Update DB: `python -c "import data_manager as dm; dm.update_recent_data(days=5)"`
-   - Skips symbols already up-to-date and avoids pre‑close (before 16:00 JST) requests.
-2. Rebuild cache: `python precompute.py` (auto-expands DB + updates market caps each run)
-3. Generate signals: `python generate_signals.py` (scanner only) or `python generate_signals_with_research.py` (scanner + LLM, auto-saves to `results/llm_research_*.json` and `.csv`)
-4. Plot charts (optional): `python plot_signals_charts.py --top 20 --days 180`
-5. Terminal dashboard (optional): `python signals_dashboard.py --top 20 --days 180`
-6. Streamlit dashboard (recommended): `streamlit run streamlit_dashboard.py`  
-   - If empty, select a **date with signals** (checkbox on by default) or lower **Min Score**.
-7. Run All: `python run_all.py` (defaults editable in file)
-
-Stops/targets are % based (6% stop, 2R target) and should be computed from your actual entry fill at the open.  
-Output is split into lot-affordable vs over-budget picks using `MAX_JPY_PER_TRADE` and `LOT_SIZE` from `config.py`.  
-Early Mode is default: 10‑day return < 15%, RSI ≤ 65, and early‑scanner subset. Toggle legacy output via `EARLY_MODE_SHOW_BOTH`.  
-Signal entry prices use the **next trading day open** when available; if not, they fall back to the last close and are marked with `*`.
-
----
-
-## Expanding DB Coverage (One-Time / Occasional)
-
-If a ticker is not present in `jp_stocks.db` (table `daily_prices`), it cannot be scanned and will never appear in signals.
-
-Use incremental downloads (resumable):
-- Add ~1,000 new tickers: `python expand_db.py --max-new 1000 --start 2024-01-01`
-- Repeat as needed, then rebuild the cache: `python precompute.py`
-
-Auto-expand is enabled by default in `config.py` and runs inside `precompute.py`.
-
----
-
-## Script Reference
-
-| Script | Purpose | Usage |
-|--------|---------|-------|
-| `generate_signals_with_research.py` | **Main Tool**: Scans + AI Research | Daily |
-| `llm_research.py` | AI Module (Perplexity API) | Import only |
-| `generate_signals.py` | Legacy: Scans only (faster) | Quick check |
-| `run_all.py` | Full pipeline (expand + caps + cache + signals) | Daily |
-| `diagnose_missed_signals.py` | Diagnose excluded legacy signals for a date (Early Mode vs legacy) | Debug |
-| `run_walk_forward.py` | Optimization | Research |
-
----
-
-## Scanners (9 Active)
-
-### Star Performers
-- **`oversold_bounce`** — PF 11.13, RSI oversold + bounce
-- **`burst_candidates`** — PF 4.30, Historical pattern match
-- **`momentum_star`** — PF 4.77, EMA cross + volume
-
-### Solid Contributors  
-- **`relative_strength`** — PF 1.98, MA alignment
-- **`volatility_explosion`** — PF 2.20, High vol near lows
-- **`consolidation_breakout`** — Tight range breakout
+7) **Run everything (no LLM by default):**
+   - `python run_all.py`
+   - `run_all.py` now includes burst audit catch-up by default (`--pending --start BURST_AUDIT_START_DATE`).
+   - A/B is run by default from config. Override from CLI:
+     - `--no-burst-ab`
+     - `--burst-ab-top-n 10`
+     - `--burst-ab-shadow-min-volume 5000`
+   - Edit defaults in `config.py` and `run_all.py` (or use CLI flags).
+   - Expansion paths:
+     - explicit: `run_all.py --expand-db --fill-market-caps`
+     - implicit: `precompute.py` runs `AUTO_EXPAND_DB` / `AUTO_UPDATE_MARKET_CAP` if enabled in `config.py`
 
 ---
 
-## Confluence Bonus
+## Universe Selection (Aligned With Backtests)
 
-When multiple scanners fire on same symbol:
-```python
-bonus = (num_scanners - 1) * 10
-# 2 scanners = +10, 3 scanners = +20, etc.
-```
+Universe is built daily by `data_manager.build_liquid_universe`:
+- Volume floor: `MIN_AVG_DAILY_VOLUME`
+- Optional market-cap ceiling: `ENFORCE_MARKET_CAP=True` + `MAX_MARKET_CAP_JPY`
+  - Missing market caps follow `MARKET_CAP_MISSING_POLICY` (default: include)
+- Nikkei 225 excluded when enabled: `EXCLUDE_NIKKEI_225=True`
+- **No top-N cap by default:** `UNIVERSE_TOP_N=None`
 
----
-
-## Transaction Costs
-
-- Slippage: 0.4%
-- Commission: 0.1%  
-- **Total: 1.0% round-trip**
+If you change universe/scanner parameters in `config.py`, the next cache run detects the fingerprint change and rebuilds automatically.
 
 ---
 
-*Last updated: 2026-02-02*
+## Early Mode (Default)
+
+The "Early Mode" output is meant to bias toward **soon-to-burst** candidates instead of already-pumped momentum names.
+
+Default filters:
+- RSI <= `EARLY_MODE_RSI_MAX` (currently 65)
+- 10D return < `EARLY_MODE_10D_RETURN_MAX` (currently 15%)
+
+Default scanner subset:
+- `oversold_bounce`, `reversal_rocket`, `volatility_explosion`, `coiling_pattern`, `consolidation_breakout`
+
+Optional legacy (momentum-allowed) output:
+- `EARLY_MODE_SHOW_BOTH=True`
+
+---
+
+## Signal Evaluation (Did Picks Actually Work?)
+
+Daily bars can't reveal intraday order, so evaluation uses a conservative rule:
+- **Stop is checked before target** on the same day (matches `backtesting.BacktestEngine` behavior).
+
+### Single day
+- `python evaluate_signals_forward.py --date 2026-02-02 --top 20 --horizon 10`
+- Saves: `results/signal_eval_YYYY-MM-DD_topN_hH.csv`
+
+### Date range mapping (Jan 27 -> today, etc.)
+- `python evaluate_signals_range.py --start 2026-01-27 --end 2026-02-02 --top 20 --horizon 5`
+- Saves:
+  - `results/signal_eval_range_<start>_to_<end>_topN_hH.csv` (daily summary)
+  - `results/signal_eval_range_<start>_to_<end>_topN_hH_trades.csv` (trade details)
+
+Evaluation note:
+- By default, evaluation requires a full horizon worth of future bars in the cache. If the cache ends too soon, trades are labeled `horizon_truncated` and excluded from the win-rate/avg-return stats.
+- Use `--allow-truncated-horizon` if you intentionally want partial (not fully matured) results.
+
+### A/B scorecard (Universe Phase 2 decision gate)
+- `python ab_scorecard.py --ab-master results/burst_audit/ab_audit_master.csv --top-n 10 --window-days 20 --min-days 20`
+- Saves:
+  - `results/burst_audit/ab_scorecard_daily.csv`
+  - `results/burst_audit/ab_scorecard_latest.json`
+- Decision logic:
+  - Requires at least `min_days` observed burst dates in the rolling window
+  - Pass capture gate if relative capture-rate improvement (B vs A) >= `min_rel_capture_improvement`
+  - Pass precision gate if relative precision drop (B vs A) <= `max_rel_precision_drop`
+
+---
+
+## Common Outputs (Where Data Is Stored)
+
+- Price DB: `jp_stocks.db`
+  - `daily_prices` (OHLCV)
+  - `symbol_info` (market cap, name, sector)
+  - `jpx_short_interest` (live-only context; optional)
+- Cache: `results/precomputed_cache.pkl` (incrementally updated by default)
+- Daily picks: `results/daily_picks/daily_picks_YYYY-MM-DD.csv|json`
+- Burst log: `results/burst_audit/bursts_log.csv`
+- Burst audit: `results/burst_audit/audit_YYYY-MM-DD.csv|json` and `results/burst_audit/audit_master.csv`
+- Burst audit A/B: `results/burst_audit/ab_audit_YYYY-MM-DD.csv|json` and `results/burst_audit/ab_audit_master.csv`
+- A/B scorecard: `results/burst_audit/ab_scorecard_daily.csv` and `results/burst_audit/ab_scorecard_latest.json`
+- Shadow picks cache: `results/daily_picks_ab/daily_picks_shadow_YYYY-MM-DD.csv|json`
+- LLM research: `results/llm_research_*.json|csv`
+- Evaluation: `results/signal_eval_*.csv` and `results/signal_eval_range_*.csv`
+
+---
+
+## Notes / Limitations
+
+- Manual execution only (no broker API yet).
+- Daily OHLC evaluation is approximate (no intraday sequencing).
+- If you want to reduce the cost of market-cap updates, set `AUTO_UPDATE_MARKET_CAP=False` once market caps are mostly filled.
+
+---
+
+## Related Docs
+
+- Daily priorities and retune gates: `NEXT_STEPS.md`
+- Full architecture and handoff details: `PROJECT_HANDOFF.md`
+- Release-level change history: `CHANGELOG.md`
+
+## Module Ownership
+
+- Library modules:
+  - `config.py`
+  - `data_manager.py`
+  - `technical_analysis.py`
+  - `scanners.py`
+  - `backtesting.py`
+  - `optimizer.py`
+  - `llm_research.py`
+- Core operational CLI scripts:
+  - `run_all.py`
+  - `precompute.py`
+  - `generate_signals.py`
+  - `generate_signals_with_research.py`
+  - `burst_audit.py`
+- Analysis/reporting CLI scripts:
+  - `evaluate_signals_forward.py`
+  - `evaluate_signals_range.py`
+  - `ab_scorecard.py`
+  - `diagnose_missed_signals.py`
+  - `plot_signals_charts.py`
+- Maintenance CLI scripts:
+  - `expand_db.py`
+  - `fill_market_caps.py`
+  - `clean_bad_yfinance_tickers.py`
+  - `yfinance_field_mapper.py`
+
+## A/B Testing Path
+
+Current implemented phase:
+
+1) Universe A/B (Phase 2):
+   - A (baseline): current universe filters
+   - B (shadow): same filters, lower min volume (`BURST_AB_SHADOW_MIN_VOLUME`)
+   - Comparison metric: burst capture at `top N` (`BURST_AB_TOP_N`)
+
+2) Single-signal A/B (Phase 3):
+   - A (baseline): current ranking
+   - B (shadow): same universe, enforce minimum single-scanner presence in top-N
+   - Controls:
+     - `BURST_AB_SINGLE_MIN_COUNT`
+     - `BURST_AB_SINGLE_MIN_SCORE`
+     - `BURST_AB_TOP_N`
+   - Select variant with:
+     - `BURST_AB_VARIANT = "single_signal_mix"`
+     - or CLI `--ab-variant single_signal_mix`
+
+Planned next phases:
+
+1) Scanner-subset A/B based on observed miss reasons
+
+Rules:
+- Change one variable at a time
+- Evaluate with `top 10` as primary cut
+- Require a minimum 20-trading-day window per phase before promoting changes
+
+---
+
+Last updated: 2026-02-11

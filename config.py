@@ -1,5 +1,5 @@
 """
-JP Stocks Modular Trading System — Configuration
+JP Stocks Modular Trading System - Configuration
 
 config.py is the single source of truth for parameters.
 You can override in notebook sessions:
@@ -35,6 +35,34 @@ RESULTS_DIR.mkdir(exist_ok=True)
 CACHE_TICKER_LIST_HOURS = 720
 CACHE_JPX_DATA_HOURS = 12
 YFINANCE_HISTORY_PERIOD = "5y"
+# After this JST hour, Yahoo daily bars are typically available
+YFINANCE_DAILY_READY_HOUR = 23
+# If True, never request today's bar (regardless of JST hour)
+YFINANCE_SKIP_TODAY_ALWAYS = False
+
+# Guard: clamp requests to the latest daily bar Yahoo actually has (prevents
+# massive "possibly delisted / no price data found" spam when Yahoo is lagging).
+YFINANCE_USE_LATEST_DATE_GUARD = True
+YFINANCE_LATEST_DATE_SAMPLE_TICKER = "7203.T"   # Toyota: stable, high-liquidity
+YFINANCE_LATEST_DATE_LOOKBACK_DAYS = 14
+YFINANCE_LATEST_DATE_CACHE_MINUTES = 30
+
+# Speed: for short ranges (e.g., daily updates) use batched multi-ticker downloads.
+YFINANCE_BULK_DOWNLOAD = True
+YFINANCE_BULK_BATCH_SIZE = 200          # Tickers per yfinance call
+YFINANCE_BULK_MAX_RANGE_DAYS = 14       # Use bulk only for short ranges
+YFINANCE_BULK_MIN_SYMBOLS = 50          # Below this, per-ticker is fine
+YFINANCE_BULK_THREADS = True
+
+# "bad_yfinance_tickers.txt" handling:
+# - "skip_if_no_db_data" (default): only skip if the symbol has no rows in DB (safe)
+# - "skip_all": always skip symbols listed in cache/bad_yfinance_tickers.txt
+# - "ignore": do not skip based on the file
+YFINANCE_BAD_TICKERS_POLICY = "skip_if_no_db_data"
+
+# Recent update tuning (update_recent_data)
+YFINANCE_UPDATE_COMMIT_INTERVAL = 200
+YFINANCE_UPDATE_SLEEP_SECONDS = 0.0
 
 # =============================================================================
 # Auto-Expand DB (incremental daily growth)
@@ -57,6 +85,27 @@ CACHE_RAW_SIGNALS = True
 # Save LLM research results to results/llm_research_YYYYMMDD_HHMMSS.json
 SAVE_LLM_RESULTS = True
 
+# Save scanner-only daily picks to results/daily_picks_YYYY-MM-DD.csv/.json
+SAVE_DAILY_PICKS = True
+
+# Burst audit workflow defaults
+BURST_AUDIT_ENABLED = True
+BURST_AUDIT_START_DATE = "2026-01-31"
+BURST_AUDIT_THRESHOLD_CLOSE_PCT = 0.10
+
+# Burst A/B (Phase 2: Universe)
+# Compare baseline daily picks vs shadow universe variant using top-N capture.
+BURST_AB_ENABLED = True
+BURST_AB_TOP_N = 10
+BURST_AB_SHADOW_MIN_VOLUME = 5_000
+# Variants:
+# - "universe_min_volume": shadow widens universe with lower min volume
+# - "single_signal_mix": shadow keeps same universe, but enforces minimum
+#   single-scanner presence in top-N ranking
+BURST_AB_VARIANT = "single_signal_mix"
+BURST_AB_SINGLE_MIN_COUNT = 3
+BURST_AB_SINGLE_MIN_SCORE = 70
+
 # =============================================================================
 # Market Cap Ingestion (for universe filter)
 # =============================================================================
@@ -78,8 +127,8 @@ MARKET_CAP_MISSING_POLICY = "include"
 # Lower it to include smaller/micro-cap names that can "burst".
 MIN_AVG_DAILY_VOLUME = 20_000
 LIQUIDITY_FLOOR_JPY = 100_000_000
-# Expanded universe to reduce large-cap bias from "top notional" ranking.
-UNIVERSE_TOP_N = 1500
+# Universe cap by notional (None = no cap; rely on min-volume + market-cap filters)
+UNIVERSE_TOP_N = None
 EXCLUDE_NIKKEI_225 = True
 
 # Performance pre-filters (from JP prototype)
@@ -284,7 +333,10 @@ def print_config_summary():
     print("JP Stocks Modular - Configuration Summary")
     print("=" * 60)
     print(f"Database: {DATABASE_FILE}")
-    print(f"Universe: Top {UNIVERSE_TOP_N} stocks")
+    if UNIVERSE_TOP_N:
+        print(f"Universe: Top {UNIVERSE_TOP_N} stocks")
+    else:
+        print("Universe: No top-N cap (min-volume + market-cap only)")
     print(f"Max Market Cap: ¥{MAX_MARKET_CAP_JPY:,.0f}")
     print(f"Exclude Nikkei 225: {EXCLUDE_NIKKEI_225}")
     print("-" * 60)

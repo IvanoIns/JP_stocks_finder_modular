@@ -69,10 +69,29 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Diagnose missed signals for a date")
     parser.add_argument("--date", required=True, help="Trading date to analyze (YYYY-MM-DD)")
     parser.add_argument("--top", type=int, default=config.UNIVERSE_TOP_N, help="Universe top N by notional")
+    parser.add_argument(
+        "--symbols",
+        type=str,
+        default="",
+        help="Comma/space-separated tickers to analyze (optional, e.g. 7901,7771,4960 or 7901.T 4960.T)",
+    )
     parser.add_argument("--lookback-days", type=int, default=400, help="Calendar days of lookback to load")
     parser.add_argument("--chunk-size", type=int, default=800, help="DB batch chunk size (<= ~900)")
     parser.add_argument("--output", default="", help="Output CSV path (default: results/missed_signals_<date>.csv)")
     args = parser.parse_args()
+
+    def _normalize_symbol(s: str) -> str:
+        s = (s or "").strip().upper()
+        if not s:
+            return ""
+        if "." in s:
+            return s
+        return f"{s}.T"
+
+    user_symbols: list[str] = []
+    if args.symbols:
+        raw = args.symbols.replace(",", " ").split()
+        user_symbols = [_normalize_symbol(s) for s in raw if _normalize_symbol(s)]
 
     date = args.date
     lookback_start = (datetime.strptime(date, "%Y-%m-%d") - timedelta(days=args.lookback_days)).strftime("%Y-%m-%d")
@@ -90,8 +109,12 @@ def main() -> int:
 
     rows: list[Row] = []
 
+    symbols_to_analyze = user_symbols if user_symbols else universe
+    if user_symbols:
+        print(f"Symbols requested: {len(user_symbols)}")
+
     # Fetch data in chunks to avoid SQLite variable limits
-    for chunk in _chunked(universe, args.chunk_size):
+    for chunk in _chunked(symbols_to_analyze, args.chunk_size):
         batch = dm.get_daily_bars_batch(chunk, start_date=lookback_start, end_date=date)
         for symbol in chunk:
             df = batch.get(symbol)
@@ -99,7 +122,7 @@ def main() -> int:
                 rows.append(
                     Row(
                         symbol=symbol,
-                        in_universe=True,
+                        in_universe=symbol in universe_set,
                         rsi=None,
                         ret_10d=None,
                         early_filter_pass=False,
@@ -112,6 +135,7 @@ def main() -> int:
                 )
                 continue
 
+            in_universe = symbol in universe_set
             df_ind = ta.calculate_all_indicators(df, scanner_config)
             rsi, ret_10d, early_pass = _compute_early_filter(df_ind)
 
@@ -141,25 +165,40 @@ def main() -> int:
             early_strategy = early_top.get("strategy") if early_top else None
 
             excluded_reason = None
-            if legacy_top and legacy_score is not None and legacy_score >= min_score:
-                # legacy qualifies, but early might be filtering it out
-                if not early_top:
-                    if not early_pass:
-                        excluded_reason = "early_filter_fail"
-                    else:
-                        # Passed early pre-filter, but no early scanner signal
-                        if legacy_strategy and legacy_strategy not in early_scanners:
-                            excluded_reason = "excluded_by_early_scanner_subset"
+            if not in_universe:
+                excluded_reason = "not_in_universe"
+            else:
+                early_ok = (early_score is not None) and (early_score >= min_score)
+                legacy_ok = (legacy_score is not None) and (legacy_score >= min_score)
+
+                if early_ok:
+                    excluded_reason = None
+                elif legacy_ok:
+                    # Legacy qualifies, but early might be filtering it out
+                    if not early_top:
+                        if not early_pass:
+                            excluded_reason = "early_filter_fail"
                         else:
-                            excluded_reason = "no_early_signal"
-                else:
-                    if early_score is not None and early_score < min_score:
+                            # Passed early pre-filter, but no early scanner signal
+                            if legacy_strategy and legacy_strategy not in early_scanners:
+                                excluded_reason = "excluded_by_early_scanner_subset"
+                            else:
+                                excluded_reason = "no_early_signal"
+                    else:
                         excluded_reason = "early_score_below_min"
+                else:
+                    # Nothing qualifies (useful when --symbols is used)
+                    if early_top and (early_score is not None) and early_score < min_score:
+                        excluded_reason = "early_score_below_min"
+                    elif legacy_top and (legacy_score is not None) and legacy_score < min_score:
+                        excluded_reason = "legacy_score_below_min"
+                    elif not early_top and not legacy_top:
+                        excluded_reason = "no_signal"
 
             rows.append(
                 Row(
                     symbol=symbol,
-                    in_universe=True,
+                    in_universe=in_universe,
                     rsi=rsi,
                     ret_10d=ret_10d,
                     early_filter_pass=early_pass,
